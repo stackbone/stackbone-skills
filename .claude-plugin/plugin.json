@@ -1,0 +1,27 @@
+{
+  "name": "stackbone",
+  "description": "Agent skills for Stackbone: the App Store + hosting for AI agents. Creators publish containerized agent templates; organizations install them as agents that run with their own Postgres (Neon + pgvector), object storage (R2), queues (QStash), HITL inbox and LLM gateway (OpenRouter). This plugin gives coding agents the full Stackbone surface: @stackbone/sdk (database, storage, AI, RAG, queues, approval), CLI for scaffolding and publishing (init, dev, publish, db migrate), and diagnostics for HITL, runs, logs, secrets and metrics.",
+  "version": "0.1.0",
+  "author": {
+    "name": "Stackbone",
+    "url": "https://stackbone.ai"
+  },
+  "homepage": "https://stackbone.ai",
+  "repository": "https://github.com/stackbone-ai/stackbone-skills",
+  "license": "MIT",
+  "keywords": [
+    "stackbone",
+    "ai-agents",
+    "agent-marketplace",
+    "coding-agents",
+    "langgraph",
+    "hono",
+    "postgres",
+    "pgvector",
+    "rag",
+    "hitl",
+    "openrouter",
+    "neon",
+    "qstash"
+  ]
+}
