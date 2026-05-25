@@ -8,7 +8,7 @@ Agent Skills for coding agents (Claude Code, Cursor, Windsurf, Cline, Codex, ...
 
 ## What is Stackbone?
 
-A marketplace where creators publish containerized **agent templates** (Hono + Node 24 LTS + `@stackbone/sdk`); organizations install them and get an **agent** (instance) with its own Postgres (Neon + pgvector), object storage (Cloudflare R2), durable queues (QStash), HITL inbox and LLM gateway (OpenRouter). The creator never writes auth, billing, metrics or integration clients — they declare the agent's surface in `agent.yaml` and the platform takes care of the rest.
+Creators publish containerized **agent templates** built on `@stackbone/sdk` and a language-agnostic Stackbone runtime; organizations install them and get an **agent** (instance) with its own database (with vector search), object storage, durable queues, HITL inbox and LLM gateway baked in. The creator never writes auth, billing, metrics or integration clients — every step of the lifecycle (scaffold, develop, publish, operate) runs through the `stackbone` CLI.
 
 ## Installation
 
