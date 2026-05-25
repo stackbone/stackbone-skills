@@ -1,4 +1,8 @@
+![Stackbone Agent Skills](./github_skills_banner.png)
+
 # Stackbone Agent Skills
+
+[![skills.sh](https://skills.sh/b/stackbone/stackbone-skills)](https://skills.sh/stackbone/stackbone-skills)
 
 Agent Skills for coding agents (Claude Code, Cursor, Windsurf, Cline, Codex, ...) building on [Stackbone](https://stackbone.ai) — the App Store + hosting platform for AI agents.
 
