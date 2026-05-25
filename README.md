@@ -11,7 +11,7 @@ A marketplace where creators publish containerized **agent templates** (Hono + N
 ### Using the skills registry
 
 ```bash
-npx skills add stackbone-ai/stackbone-skills
+npx skills add stackbone/stackbone-skills
 ```
 
 Add `-a claude-code` / `-a cursor` / `-a windsurf` / etc. to target specific agents. With no `-a` flag the registry installs into every supported agent it detects.
@@ -19,7 +19,7 @@ Add `-a claude-code` / `-a cursor` / `-a windsurf` / etc. to target specific age
 ### Claude Code marketplace
 
 ```
-/plugin marketplace add stackbone-ai/stackbone-skills
+/plugin marketplace add stackbone/stackbone-skills
 /plugin install stackbone
 ```
 

@@ -9,7 +9,7 @@ This repo is **subtreed** into the Stackbone monorepo at `skills/` (see the ADR 
 ```bash
 # Pull upstream changes into the monorepo (run from the monorepo root)
 git subtree pull --prefix=skills \
-  https://github.com/stackbone-ai/stackbone-skills.git main --squash
+  https://github.com/stackbone/stackbone-skills.git main --squash
 ```
 
 The convention is **edit upstream first**, then pull into the monorepo. Cross-cutting fixes made inside the monorepo that touch both platform code and the skills can be pushed back with `git subtree push`, but that is an exception, not the default.
