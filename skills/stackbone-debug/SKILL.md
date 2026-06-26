@@ -1,187 +1,257 @@
 ---
 name: stackbone-debug
 description: >-
-  Use this skill when triaging an error, failure or unexpected behavior in a Stackbone agent —
-  either running locally under `stackbone dev` or deployed in production. Covers SDK errors
-  ({ data, error } envelope codes), HTTP 4xx/5xx from the control plane, run failures and timeouts,
-  HITL runs stuck waiting for approval, database slow queries / missing indexes / pgvector mismatches,
-  secrets decryption errors, queue (QStash) signature verification failures, deploy failures
-  (Trivy CVE block, cosign signing, registry push), tier quota exceeded responses, and OpenRouter
-  rate-limit / billing-paused situations. Trigger on requests like: my agent isn't working,
-  why is this 500, this run hung, the HITL inbox is empty but the run is paused, publish failed,
-  why am I getting 402, the LLM call returns no response. The skill guides diagnostic command
-  execution; it does not propose fixes — once you've located the cause, switch back to the stackbone
-  or stackbone-cli skill to implement the fix.
+  Use this skill when triaging an error, failure or unexpected behavior in a Stackbone workspace —
+  a durable eve agent or a durable workflow running locally under `stackbone dev`, or an install
+  deployed to a cloud / self-host.
+  Covers SDK errors ({ data, error } envelope codes from the catalog returned by the ambient `stackbone`
+  client), HTTP 4xx/5xx from the control plane, durable run failures and timeouts, `workflow_input_invalid`
+  (a workflow start/chat whose input failed its declared schema), HITL runs stuck waiting for a `requestApproval()`
+  gate, database slow queries / missing indexes / pgvector mismatches, secrets decryption errors, connector
+  action failures via `stackbone.connection(id)` (ambiguous / unauthorized connections), publish/build failures
+  (SDK inlined, eve partially traced), tier quota exceeded responses, and OpenRouter rate-limit / billing-paused
+  situations. Trigger on requests like: my agent isn't working, why is this 500, this run hung, the HITL inbox is
+  empty but the run is paused, the workflow rejected my input, publish failed, why am I getting 402, why is my
+  connector call ambiguous, the model call returns no response. The skill guides diagnostic command execution;
+  it does not propose fixes — once you've located the cause, switch back to the stackbone or stackbone-cli skill
+  to implement the fix.
 license: MIT
 metadata:
   author: stackbone
-  version: '0.1.0'
+  version: '0.4.1'
   organization: Stackbone
-  date: May 2026
+  date: June 2026
 ---
 
 # Stackbone debug & diagnostics
 
-This skill helps an AI coding agent **locate** the source of a failure in a Stackbone agent — it does not propose fixes. Once the cause is identified, switch back to the **stackbone** skill (for SDK / `agent.yaml` changes) or the **stackbone-cli** skill (for CLI / db / publish actions) to implement the fix.
+This skill helps an AI coding agent **locate** the source of a failure in a Stackbone workspace — a durable eve agent or a durable workflow — it does not propose fixes. Once the cause is identified, switch back to the **stackbone** skill (for SDK / agent / workflow code changes) or the **stackbone-cli** skill (for CLI / db / publish actions) to implement the fix.
+
+A workspace is a multi-piece project: an `agents/` folder (one eve agent per subfolder, each with an `agents/<name>/agent.yaml`) and a `workflows/` folder (one durable workflow per `workflows/<name>.workflow.ts`). The registry is **discovered by convention** from those files — every `agents/<name>/agent.yaml` is an agent (the manifest `name:` must equal the folder basename) and every `workflows/<name>.workflow.ts` is a workflow (its name is the file basename without `.workflow.ts`, exporting `<camelCase(name)>Workflow`). A `stackbone.config.ts` (`defineWorkspace({ agents, workflows })`) is an **optional override**: if present it wins over the convention scan, otherwise the workspace is discovered from the files on disk — so most projects need none. Each eve agent serves a durable session API (`/eve/v1/*`); workflows are durable functions (`'use workflow'` / `'use step'`) triggered through the runtime's HTTP contract or the CLI. Every invocation — an agent turn or a workflow run — produces a **durable run** with a **step** log you inspect after the fact.
+
+> eve agents, durable workflows and the workspace runtime are exercised by `stackbone dev` today. On a deployed cloud install the workflows / runs / HITL endpoints may still 404 until the prod port lands — a 404 there is expected, not a bug.
 
 ## How to use this skill
 
-1. Capture the symptom verbatim from the user (error message, HTTP status, stuck behavior, unexpected output).
+1. Capture the symptom verbatim from the user (error message, HTTP status, stuck run, unexpected output).
 2. Match the symptom to a row in the tables below.
 3. Run the diagnostic command **as-is** (these are read-only, safe).
 4. Report what you found in plain narrative — exact command output, not paraphrase.
 5. Hand off to `stackbone` or `stackbone-cli` for the fix.
 
-> **Read-only by design.** No command in this skill mutates state. If a diagnostic requires a mutation (e.g. resetting a stuck job), it's flagged with **⚠️ destructive** and the agent must surface the proposal to the user before executing.
+> **Read-only by design.** No command in this skill mutates state. If a diagnostic requires a mutation (e.g. retrying a failed run), it's flagged with **⚠️ destructive** and the agent must surface the proposal to the user before executing.
 
 ---
 
 ## SDK errors — `{ data, error }` envelope
 
-Every `client.*` method returns `{ data, error }`. The `error` is `null` on success; otherwise it carries `{ code, message, details, retryable }`.
+Most surface reads on the ambient `stackbone` client return a `{ data, error }` envelope. The `error` is `null` on success; otherwise it carries `{ code, message, cause?, meta? }`. `code` is a literal from the catalog (`<prefix>_<reason>`, e.g. `ai_rate_limited`, plus a handful of standalone setup-bug codes); `meta` is the structured escape hatch (paths, retry hints, AWS metadata, constraint names); `cause` carries the upstream error object. There is no `details`, `retryable`, or `nextActions` field on an `SdkError` — read `meta`/`cause` instead.
 
-| `error.code`                 | Where it comes from                                                                  | First diagnostic                                                                                    |
-| ---------------------------- | ------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------- |
-| `not_authenticated`          | `PLATFORM_API_KEY` missing or invalid                                                | `stackbone metadata --json` (check auth status)                                                     |
-| `tier_quota_exceeded`        | Org's credit bundle is spent                                                         | Surface `error.nextActions` verbatim — do not retry                                                 |
-| `capability_not_granted`     | Trying to use a module (e.g. `client.rag`) not declared in `agent.yaml.capabilities` | Read `agent.yaml`; if the capability is missing, that's the fix                                     |
-| `validation_failed`          | Input did not match `defineAgent({ schema })`                                        | `error.details` has the Zod-style path + reason — inspect verbatim                                  |
-| `db_constraint_violation`    | Drizzle / Postgres FK/unique/check failure                                           | `error.details.constraint` names the violated constraint; `stackbone db migrate status` for context |
-| `db_connection_error`        | Neon hibernated or transient                                                         | Wait ~3 s and retry once; if persistent, check Neon Console                                         |
-| `rag_ingest_failed`          | LlamaParse parse error, file too big, unsupported format                             | `error.details.file` + `error.details.reason`; check `rag.parser` in `agent.yaml`                   |
-| `llm_rate_limited`           | OpenRouter throttling                                                                | `error.details.retry_after_ms` — back off and retry                                                 |
-| `llm_billing_paused`         | Stackbone sub-key disabled (org credits spent)                                       | Same as `tier_quota_exceeded` — surface and stop                                                    |
-| `storage_not_found`          | Object key doesn't exist in the bucket                                               | Check the `key` you saved vs what's in `_storage_objects`                                           |
-| `storage_signed_url_expired` | Pre-signed URL TTL elapsed                                                           | Regenerate with `client.storage.signedUrl()`                                                        |
-| `queue_signature_invalid`    | QStash receiver HMAC check failed                                                    | Check `QSTASH_CURRENT_SIGNING_KEY` vs `QSTASH_NEXT_SIGNING_KEY` rotation state                      |
-| `approval_already_decided`   | `client.approval.resume()` on an approval that is already approved/rejected          | `client.approval.get(id)` shows the decision                                                        |
-| `connection_not_authorized`  | `client.connections.from('notion').client()` but the org never authorized Notion     | Check `connections:` in `agent.yaml`; the org must complete OAuth in Studio                         |
+> Two surfaces do NOT use the envelope. `stackbone.database` is native Drizzle — `await` returns rows and **throws** on error (catch it, there's no `.error`). An agent session's `result()` returns `{ data, status }`, not `{ data, error }`.
+
+| `error.code`                      | Where it comes from                                                                       | First diagnostic                                                                                                                                                                                             |
+| --------------------------------- | ----------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `capability_unavailable`          | A module (e.g. `stackbone.rag`) isn't granted by the negotiated protocol contract         | Gating is in the contract handshake, not a config field — if it persists it's a control-plane/install issue, not a workspace edit                                                                            |
+| `rag_invalid_request`             | Input to `stackbone.rag.*` failed validation (missing `id`/`text`, bad shape)             | `error.message` names the missing/invalid field; check the call args                                                                                                                                         |
+| `rag_schema_missing`              | The workspace's RAG tables aren't present on this install                                 | The RAG schema is platform-provisioned per install — a missing one is a setup/provisioning issue, not a creator action                                                                                       |
+| `rag_dim_mismatch`                | Stored embedding dimension differs from the query model's dimension                       | `error.meta` has the expected vs actual dims; the embedding model changed after ingest                                                                                                                       |
+| `rag_embedding_failed`            | The embedder call failed (OpenRouter error, bad model)                                    | Inspect `error.cause`; confirm the embedding model the workspace configured                                                                                                                                  |
+| `rag_embedding_model_unsupported` | The configured embedding model isn't supported by the pipeline                            | `error.message` names the model; pick a supported one                                                                                                                                                        |
+| `rag_ingest_cancelled`            | An in-flight ingest job was cancelled                                                     | Expected when a newer ingest superseded it; re-run if unintended                                                                                                                                             |
+| `ai_rate_limited`                 | OpenRouter throttling (HTTP 429)                                                          | `error.meta` carries the upstream headers — back off and retry                                                                                                                                               |
+| `ai_credits_exhausted`            | The org's OpenRouter credit bundle is out of credits (HTTP 402)                           | Org credit bundle is spent — surface and stop, do not retry                                                                                                                                                  |
+| `ai_moderation_blocked`           | OpenRouter blocked the request on moderation (HTTP 451)                                   | Inspect the prompt; this is a content decision, not retryable                                                                                                                                                |
+| `ai_provider_error`               | Upstream model/provider failure (5xx from OpenRouter)                                     | `error.cause` has the raw provider error — transient, retry once                                                                                                                                             |
+| `ai_no_image_generated`           | An image generation call returned no image                                                | Inspect the prompt/model; not retryable as-is                                                                                                                                                                |
+| `openrouter_key_missing`          | `OPENROUTER_API_KEY` not injected into the runtime                                        | Setup bug — the per-install sub-key wasn't provisioned; `stackbone openrouter get --agent <id> --json` shows whether the install's key is `configured` and its `mode`/`status` (the value is never revealed) |
+| `s3_invalid_key`                  | The object key is malformed or empty                                                      | Check the `key` you passed to `stackbone.storage.*`                                                                                                                                                          |
+| `s3_error`                        | Generic R2/MinIO failure (most S3 errors collapse here)                                   | `error.meta` carries the AWS metadata; `error.cause` the raw SDK error                                                                                                                                       |
+| `s3_credentials_missing`          | R2/MinIO credentials not injected                                                         | Setup bug — check the install's storage env                                                                                                                                                                  |
+| `s3_bucket_missing`               | The bucket env var isn't set                                                              | Setup bug — check the install's storage env                                                                                                                                                                  |
+| `secrets_not_found`               | `stackbone.secrets.get('FOO')` for a name that isn't set                                  | Confirm with `stackbone secrets list --agent <id> --json` (names + masked previews) or Studio's Secrets tab                                                                                                  |
+| `secrets_not_configured`          | `STACKBONE_SECRET_KEY` (the per-agent decrypt key) is missing                             | Setup bug — the install never received its secret key                                                                                                                                                        |
+| `secrets_decrypt_failed`          | The stored envelope can't be decrypted with the agent's key                               | Key/envelope mismatch — `error.cause` has the crypto error                                                                                                                                                   |
+| `database_not_configured`         | `DATABASE_URL` missing — the database pool can't be built                                 | Setup bug — applies to `stackbone.database` and its consumers (RAG, secrets, config, prompts)                                                                                                                |
+| `approval_persist_failed`         | The `stackbone_platform.approvals` row write failed (the run never showed in the inbox)   | A missing/unmigrated `approvals` table or a DB error — `error.cause` has the Postgres error                                                                                                                  |
+| `approval_cancel_failed`          | A cancel landed on an approval that is no longer `pending`                                | `stackbone hitl get <hitlId> --agent <id> --json` shows the current `status`                                                                                                                                 |
+| `approval_not_found`              | A get/cancel for an approval id that doesn't exist                                        | The id never persisted — check the approval id from the run's inbox entry                                                                                                                                    |
+| `approval_invalid_signature`      | An HMAC approval callback whose signature doesn't match                                   | The callback wasn't signed by the control plane (or the signing key drifted)                                                                                                                                 |
+| `connections_ambiguous`           | `stackbone.connection(id)` call hit several connections of that connector and no selector | `error.meta` carries the candidate connections; re-call selecting one — `stackbone connectors --json` lists them                                                                                             |
+| `connections_invalid_request`     | `args` failed the action's input schema, or a bad connector/action id was passed          | `error.message` names the problem; cross-check the action's inputs in `stackbone connectors --json`                                                                                                          |
+| `connections_unauthorized`        | A connector call rejected by the control plane (401)                                      | The injected agent token is missing/expired; the SDK attaches it automatically, so this is rare — a platform issue, surface and retry                                                                        |
+| `connections_unavailable`         | Control plane connectors proxy unreachable or returned 5xx                                | Transient — surface `error.message` and retry once                                                                                                                                                           |
+| `prompts_not_configured`          | The prompts schema isn't present on this install                                          | Run the migrations (`stackbone db migrate up --agent <id>`); `error.message` carries the hint                                                                                                                |
+| `prompts_not_found`               | `stackbone.prompts.get(key)` for an absent / soft-deleted key                             | List what exists in Studio's Prompts tab                                                                                                                                                                     |
+| `prompts_missing_var`             | A `{{var}}` in the template had no value at compile time                                  | `error.message` names the variable; pass it in the compile call                                                                                                                                              |
+
+> The full catalog of `<prefix>_<reason>` codes is the public error surface; pattern-match on `result.error.code` to branch. New codes arrive behind a minor — if you see a code not in this table, read `error.message` and treat it by its prefix family.
 
 ---
 
 ## HTTP errors from the control plane
 
-When you call the platform API directly (`PLATFORM_API_URL`), or when `stackbone <command>` reports a backend error:
+When you call the platform API directly (the control plane at `STACKBONE_API_URL`), or when `stackbone <command>` reports a backend error:
 
-| Status | Meaning                                                                                              | Diagnostic                                                                                                          |
-| ------ | ---------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
-| 401    | Not authenticated                                                                                    | `stackbone login` (interactive) or check `STACKBONE_ACCESS_TOKEN` (CI)                                              |
-| 402    | `tier_quota_exceeded` — org credit bundle spent                                                      | Read `body.nextActions`; org owner must upgrade                                                                     |
-| 403    | RBAC capability mismatch (e.g. `approver` role doing an `owner`-only action)                         | Body's `capability` field tells you which one is needed                                                             |
-| 404    | Resource not found OR cross-org leak prevention                                                      | If targeting `--agent <id>` from another org, that's expected — Studio uses the same 404 to avoid leaking existence |
-| 409    | State conflict (publishing a version that already exists, linking a directory that's already linked) | Read the body's `conflict` field                                                                                    |
-| 422    | Validation failed                                                                                    | Body's `errors[]` array lists path + reason                                                                         |
-| 5xx    | Backend issue                                                                                        | `stackbone logs platform --limit 50` (if you have access) and retry once with exponential backoff                   |
+| Status | Meaning                                                                                              | Diagnostic                                                                                                                                                                                                  |
+| ------ | ---------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 400    | Workflow input failed its declared schema (`workflow_input_invalid`)                                 | A `POST /api/workflows/:name/start` (or `/chat`) body that violates the workflow's input schema is rejected with an `issues[]` array and **no run is started** — fix the input shape (see the runs section) |
+| 401    | Not authenticated                                                                                    | `stackbone login` (interactive) or check `STACKBONE_ACCESS_TOKEN` (CI)                                                                                                                                      |
+| 402    | Tier quota exceeded — org credit bundle spent                                                        | Read the 402 body's `reason` + message (not an `SdkError`); org owner must upgrade                                                                                                                          |
+| 403    | RBAC capability mismatch (e.g. an `approver`-only role doing an `owner`-only action)                 | Body's `capability` field tells you which one is needed                                                                                                                                                     |
+| 404    | Resource not found OR cross-org leak prevention (also `workflow_not_found` for an unknown name)      | If targeting `--agent <id>` from another org, that's expected — Studio uses the same 404 to avoid leaking existence                                                                                         |
+| 409    | State conflict (publishing a version that already exists, linking a directory that's already linked) | Read the body's `conflict` field                                                                                                                                                                            |
+| 422    | Validation failed                                                                                    | Body's `errors[]` array lists path + reason                                                                                                                                                                 |
+| 5xx    | Backend issue                                                                                        | `stackbone logs tail --level error --agent <id> --json` (or Studio's Logs tab), then retry once with exponential backoff                                                                                    |
 
 ---
 
-## Runs failing or timing out
+## Durable runs failing or timing out
 
-In `stackbone dev` Studio at `http://localhost:4242` or in production Studio:
+Every invocation — an agent turn or a workflow run — produces a **durable run**. A run records a `status` (`running` / `done` / `failed` / `interrupted`), a `trigger`, timing, and a step log. Each `'use step'` inside a workflow is a persisted, replay-safe step: it runs once, is recorded, and is retried on failure — so a failed run can be inspected step-by-step and retried from its input.
+
+Locate the failing run from the shell (the local-dev install by default, or a cloud install via `--agent <id>` — `stackbone agents list` gives the ids). See the **stackbone-cli** skill for full flags.
 
 ```sh
-# (CLI surface for runs is rolling out — see ADR 2026-05-15 for the runtime surface roadmap)
-# In the meantime, inspect via Studio's Runs tab — sort by failed, click into the timeline
+stackbone runs list --status failed --agent <id> --json   # find the run id
+stackbone runs get <runId> --agent <id> --json            # header: status, trigger, timing
+stackbone logs tail --run <runId> --agent <id> --json     # the run's log frames (the step waterfall lands here)
 ```
 
-Common causes:
+> There is **no** `stackbone runs steps` verb. Inspect a run's progression through its log frames: `stackbone logs tail --run <runId>` carries the per-step records (each `'use step'` boundary, its inputs, retries and the error that failed it). Without `--follow` the tail prints the buffered frames (up to `--limit`, default 100) and exits; add `--follow` to keep watching a still-running run.
 
-| Symptom                                        | Likely cause                                                                                     | Diagnostic                                                                              |
-| ---------------------------------------------- | ------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------- |
-| Run timeout at 30 s exactly                    | Non-streamed LLM completion exceeded the invocation budget                                       | Check `src/index.ts` for `stream: false` on long completions — switch to `stream: true` |
-| Run timeout at the platform's max              | Synchronous loop over many items                                                                 | Move the loop to `client.queues.publish()` for async fan-out                            |
-| Run fails immediately with `validation_failed` | Schema mismatch between `input` and `defineAgent({ schema })`                                    | The run timeline has `validation.errors[]`                                              |
-| Run "paused" forever with no inbox entry       | `client.approval.requestAndWait` called but the request failed silently in a `try { } catch { }` | Search the code for `requestAndWait` — destructure `{ data, error }` and check          |
-| Run succeeds but no output                     | `ctx.ok()` not called or called with `undefined`                                                 | Add `client.observability.log('debug', 'before ctx.ok', { keys: Object.keys(result) })` |
+Studio's Runs tab (production, or the dev Studio served alongside `stackbone dev`) shows the same timeline visually. Common causes:
+
+| Symptom                                   | Likely cause                                                                                             | Diagnostic                                                                                                                  |
+| ----------------------------------------- | -------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| Workflow start rejected, no run created   | The `start`/`chat` body didn't match the workflow's `inputSchema` → HTTP 400 `workflow_input_invalid`    | The 400 body's `issues[]` lists each offending `{ path, message }`; cross-check against `stackbone workflows schema <name>` |
+| A step retries forever then fails the run | A `'use step'` that isn't idempotent or keeps hitting a transient error                                  | `stackbone logs tail --run <runId>` shows the retry attempts and the recurring `error.cause`; make the step idempotent      |
+| Run stuck `running` with no progress      | The workflow is parked on a durable gate (a `requestApproval()` hook) waiting for a human or its timeout | See the HITL section — the run resumes when the hook is resumed or the `timeout` fallback fires                             |
+| Run fails immediately on input validation | Schema mismatch between the request body and the workflow/agent's declared input schema                  | The run's first frames carry the Zod-style validation errors with the offending path                                        |
+| Run succeeds but no output                | A step or the workflow body returned `undefined` instead of an object matching `outputSchema`            | Confirm the body ends with `return { ... }`; add a log line before the return to dump the keys                              |
 
 ---
 
 ## HITL runs stuck
 
-When the org member says "the agent is paused but nothing is in the inbox":
+Human-in-the-loop in a workflow is the `requestApproval()` gate from `@stackbone/sdk/workflow`. It writes an `approvals` row (so the run shows in the inbox), then PAUSES the run durably on a Workflow SDK hook, racing the human decision against the `timeout` (applying the `fallback` — `'approve'` / `'reject'` — if nobody decides). The caller gates the side-effect on `decision.status === 'approved'`. The raw `defineHook` + `sleep` (also re-exported from `@stackbone/sdk/workflow`) are the escape hatch for custom gates.
 
-1. The approval likely **failed to create** because the agent's `agent.yaml` doesn't declare `capabilities: [hitl]`. Check `agent.yaml`.
-2. Or the approval was created but **rejected on the approver side and never resumed** by the agent. Check Studio's HITL tab for resolved-but-stale entries.
-3. Or the **approver role isn't assigned** to any org member. `stackbone metadata --json` shows the org's roles.
+```ts
+import { requestApproval } from '@stackbone/sdk/workflow';
+
+const decision = await requestApproval({
+  token: `refund-${orderId}`, // the resume key
+  topic: 'refund',
+  payload: { orderId, amount },
+  timeout: '24h',
+  fallback: 'reject',
+});
+if (decision.status !== 'approved') return { refunded: false };
+```
+
+When the org member says "the run is paused but nothing is in the inbox":
+
+1. The approvals row likely **failed to write** and the run never registered. Look for `approval_persist_failed` in the run's frames (`stackbone logs tail --run <runId> --agent <id> --json`) — usually a missing/unmigrated `approvals` table or a DB error (`error.cause` has the Postgres error). `requestApproval()` writes the row in its own `'use step'`, so a failed write surfaces as a failed step, not a silent swallow.
+2. Or the row was created but the run **was never resumed**. The pause is a hook keyed by the `token`; the human decides in Studio (or via the CLI), and the host resumes the parked run by that token through `POST /api/workflows/hooks/:token/resume`. List the inbox from the shell with `stackbone hitl list --agent <id> --json` and inspect one with `stackbone hitl get <hitlId> --agent <id> --json` to see its current `status` and audit trail of decisions. Decide it from the shell with `stackbone hitl approve <hitlId> --agent <id> --yes` / `stackbone hitl reject <hitlId> --agent <id> --yes` (both `⚠️ destructive`, require `--yes`, accept an optional `--reason`). Studio's HITL tab shows the same.
+3. Or the **approver role isn't assigned** to any org member, so no one can decide. `stackbone metadata --json` shows the org's roles.
+4. Or the pause already **timed out**: when the `timeout` elapses before a human decides, the `fallback` is applied and the run continues with `decision.timedOut === true`. A run that "resumed on its own and rejected" is the fallback firing — check the `timeout`/`fallback` on the `requestApproval()` call.
+
+> The CLI verb group is `hitl`; the SDK surface that writes the row is `stackbone.approval` (driven for you by `requestApproval()`). You rarely call `stackbone.approval` directly — author the gate with `requestApproval()` and let it manage the row + hook.
+
+---
+
+## Workflows — input schema, triggering, discovery
+
+A workflow declares optional sibling `inputSchema` / `outputSchema` Zod exports. The runtime validates the start/chat body against `inputSchema` at the frontier, **before** the run starts — a mismatch is the 400 `workflow_input_invalid` above (with `issues[]`), and no run is created.
+
+| Symptom                                          | Diagnostic                                                                                                                                                                                                                           |
+| ------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `stackbone workflows list` shows nothing         | The workspace exposes no workflows, or `stackbone dev` isn't serving them — confirm there are `workflows/<name>.workflow.ts` files (discovered by convention; a `stackbone.config.ts` override, if present, wins) and that dev is up |
+| Start/chat returns 400 `workflow_input_invalid`  | The body violated the declared schema — `stackbone workflows schema <name> --agent <id> --json` prints the input JSON Schema to fix the body against                                                                                 |
+| Start/chat returns 404 `workflow_not_found`      | The `:name` in the path isn't a known workflow — `stackbone workflows list --agent <id> --json` shows the exposed names                                                                                                              |
+| A workflow `◇` (no schema marker) takes raw JSON | It declares no `inputSchema`, so input passes through unvalidated and a bad shape fails later inside the run, not at the frontier                                                                                                    |
 
 ---
 
 ## Database — slow queries, missing indexes, pgvector
 
-```sh
-# (db diagnostic CLI surface is rolling out — for now use db studio + Postgres standard tooling)
-stackbone db studio
-```
+The CLI has a read-only SQL explorer against the targeted install: `stackbone db query "<single SELECT>" --agent <id> --json`, `stackbone db schemas` and `stackbone db table <schema> <table>` (see the **stackbone-cli** skill). It is **read-only** — `EXPLAIN ANALYZE` and any write still need standard Postgres tooling (`psql` or any client) pointed at `DATABASE_URL`:
 
-In `db studio`:
-
-- **Slow `SELECT`** — run `EXPLAIN (ANALYZE, BUFFERS) <query>` in the SQL console; look for sequential scans on large tables.
+- **Slow `SELECT`** — `EXPLAIN (ANALYZE, BUFFERS) <query>` via `psql` (the CLI `db query` only runs plain reads); look for sequential scans on large tables.
 - **`pgvector` distance returns wrong order** — confirm the index uses the **same distance operator** as your query (`<->` cosine, `<#>` inner product, `<=>` L2). A query with `<->` against an index built for `<#>` does a sequential scan and returns wrong results.
 - **`tsvector` queries return nothing** — confirm the column was populated (`UPDATE … SET search_tsv = to_tsvector(…)` on existing rows; the trigger only fires on writes after creation).
-- **Migration applied but the table isn't there** — `stackbone db migrate status` will show `applied` for a migration that failed mid-transaction in old SDK versions. Read the journal table directly: `SELECT * FROM _migrations ORDER BY version DESC LIMIT 5`.
+- **Migration applied but the table isn't there** — `stackbone db migrate status` shows the journal. Inspect with `stackbone db schemas --agent <id> --json` (does the table exist?) or read the journal directly via `psql`.
+
+> `stackbone.database` is native Drizzle — it **throws** on a query error (no `{ data, error }` envelope), so wrap DB code in `try/catch` and inspect the thrown Postgres error.
 
 ---
 
 ## Storage — missing files, signed URLs failing
 
-| Symptom                                                   | Diagnostic                                                                                         |
-| --------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
-| 404 on a key you just uploaded                            | The upload returned `error` and you didn't check; or you saved `key` to DB before `await` resolved |
-| Signed URL returns 403 after 5 min                        | The URL TTL elapsed — `signedUrl(key, { expiresIn: 3600 })`                                        |
-| Object exists in R2 console but not in `_storage_objects` | Someone uploaded directly to R2, bypassing the SDK — `client.storage.list()` won't show it         |
-| Local dev: uploads silently disappear                     | MinIO container not running — `docker compose ps`                                                  |
+| Symptom                                                  | Diagnostic                                                                                                                                                           |
+| -------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 404 on a key you just uploaded                           | The upload returned `error` and you didn't check; or you saved `key` before the `await` resolved                                                                     |
+| Signed URL returns 403 after 5 min                       | The URL TTL elapsed — `signedUrl(key, { expiresIn: 3600 })`                                                                                                          |
+| Object exists in storage console but not in the SDK list | Someone uploaded directly to the bucket, bypassing the SDK — `stackbone.storage.list()` (or `stackbone storage list --bucket <b> --agent <id> --json`) won't show it |
+| Local dev: uploads silently disappear                    | The local MinIO container isn't running — bring the local dev stack (Postgres + Redis + MinIO) back up                                                               |
 
 ---
 
-## Queues — QStash failures
+## Scheduled workflows not firing
 
-| Symptom                                      | Diagnostic                                                                                                                                            |
-| -------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Receiver returns 401 to QStash               | HMAC verification failed — confirm `QSTASH_CURRENT_SIGNING_KEY` is the **current** key and `QSTASH_NEXT_SIGNING_KEY` is the **next** (rotation state) |
-| Message published but receiver never invoked | Check Studio's Queues tab for dead-letter (after configured max retries the message goes to DLQ); inspect `error.lastAttemptedAt` and `error.message` |
-| Scheduled job fires twice                    | The agent has two replicas, and the schedule isn't using the QStash scheduler — use `client.queues.schedule()`, not a setInterval inside the agent    |
+A recurring trigger is a **dynamic schedule** registered with `stackbone.workflows.schedule(name, input, cron)` on the ambient client (or a declarative `export const schedules` next to the workflow). Each tick starts the named workflow as its **own run**, so you diagnose a missing tick like any run.
 
----
-
-## Deployments — `stackbone publish` failed
-
-| Stage           | Failure                     | Diagnostic                                                                                                                    |
-| --------------- | --------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
-| Validation      | `agent.yaml` schema invalid | The error has the field path; cross-check `stackbone docs agent-yaml`                                                         |
-| Build           | Buildpack timeout           | Re-run with `--verbose` to see the build log; common cause is heavy install (`pnpm install --frozen-lockfile` should be fast) |
-| Scan (Trivy)    | Blocking CVE in base image  | Buildpack pins the base; if a CVE landed, upgrade the SDK (which pulls the new buildpack)                                     |
-| Sign (cosign)   | Sigstore unreachable        | Transient — retry. If persistent, Sigstore status page.                                                                       |
-| Push (registry) | Auth error                  | Re-run `stackbone login` — registry credentials are short-lived and refreshed from your session                               |
-| Register        | Conflict on version         | `stackbone publish --version <next>` — versions are monotonic per template                                                    |
+| Symptom                     | Diagnostic                                                                                                                                                                                                                                                          |
+| --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| A schedule never fires      | `stackbone workflows list --agent <id> --json` confirms the workflow exists; check the cron cadence and that `stackbone dev` / the install is up. Re-call `stackbone.workflows.schedule` with the same `name` to replace a bad cadence (it's idempotent by `name`). |
+| It fired but the run failed | Find it with `stackbone runs list --status failed --agent <id> --json`, then `stackbone logs tail --run <runId> --agent <id> --json` (see the durable-runs section).                                                                                                |
+| It fires twice              | Two schedules target the same workflow — `stackbone.workflows.listSchedules()` shows what's registered; `stackbone.workflows.unschedule(name)` the duplicate.                                                                                                       |
 
 ---
 
-## Secrets / config / connections
+## Publish / build — `stackbone publish` failed
 
-| Symptom                                                                                     | Diagnostic                                                                                                                                             |
-| ------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `client.secrets.get('FOO')` returns `data: null, error: null`                               | The secret isn't set — check Studio's Secrets tab for that agent                                                                                       |
-| `client.config.get<T>()` returns the wrong shape                                            | The org member edited the config to something that doesn't match your `defineAgent({ schema })` constraints — surface the error so they can correct it |
-| `client.connections.from('notion').getToken()` returns `error: 'connection_not_authorized'` | The org never completed OAuth — direct the user to Studio's Connections tab                                                                            |
-| `client.connections.from('gdrive').getToken()` returns an expired token                     | Refresh is automatic; if it fails, the OAuth refresh token was revoked — re-authorize                                                                  |
+`stackbone publish` packages the whole workspace (every agent's compiled output + the workflows) into a verifiable bundle. The build runs on your host; the most common failures are build-time guardrails that abort BEFORE producing a bundle, so a broken agent never ships and crash-loops in production.
+
+| Stage        | Failure                                      | Diagnostic                                                                                                                                                                                                   |
+| ------------ | -------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Native deps  | A native (non-portable) dependency           | The scan names the offending package; remove it or replace it with a portable one                                                                                                                            |
+| Bundle (SDK) | `@stackbone/sdk` was inlined, not external   | The build aborts: an inlined SDK creates a second invocation context, so per-run logs arrive with no run id. Add `@stackbone/sdk` to the agent's `defineAgent({ build: { externalDependencies } })`          |
+| Bundle (eve) | eve was only PARTIALLY traced                | The build aborts: a sibling of eve's externalized copy was dropped, so the agent crashes at boot with `ERR_MODULE_NOT_FOUND`. Add `"eve*"` to the agent's `build.externalDependencies` to force a full trace |
+| Manifest     | `stackbone.config.ts` / `agent.yaml` invalid | The error carries the field path; fix the offending field                                                                                                                                                    |
+
+The upload to the registry + build-pointer registration is the provisioning step's job under BYOC (the CLI has no registry credentials), so `publish` writes the verifiable artifact + its digest locally and prints them. A failure there is a control-plane/provisioning concern, not a CLI one.
+
+---
+
+## Secrets / config
+
+| Symptom                                                                       | Diagnostic                                                                                                                                                                                                                                                                          |
+| ----------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `stackbone.secrets.get('FOO')` returns `error.code: 'secrets_not_found'`      | The secret isn't set — confirm with `stackbone secrets list --agent <id> --json` (names + masked previews; the value is never revealed by the CLI), or Studio's Secrets tab                                                                                                         |
+| `stackbone.secrets.get('FOO')` returns `error.code: 'secrets_decrypt_failed'` | The per-agent decrypt key (`STACKBONE_SECRET_KEY`) doesn't match the stored envelope — `error.cause` has the crypto error                                                                                                                                                           |
+| `stackbone.config.get<T>(key)` returns the wrong shape                        | The org member edited the config to something that doesn't match the schema you validate it against — inspect the active document with `stackbone config get --agent <id> --json` (and its history with `stackbone config versions`), then surface the error so they can correct it |
+
+> Connectors are a live surface: `stackbone.connection(id)` calls the control-plane connectors proxy and returns the normal `{ data, error }` envelope with `connections_*` codes (see the SDK error table above). The most common one is `connections_ambiguous`: a call that hit several connections of the same connector with no selector. The candidate list rides on `error.meta`; resolve the id or unique name with `stackbone connectors --json` (see the **stackbone-cli** skill) and select it.
 
 ---
 
 ## Tier / billing — 402 responses
 
-| Body's `error.code`               | Meaning                                    | Action                                                            |
+These are **control-plane HTTP 402 bodies**, not `SdkError`s. They surface when you call the platform API directly (or when a `stackbone <command>` hits a tier cap) — they are **not** in the `SdkErrorCode` catalog and you **cannot** pattern-match them with `result.error.code` from a `stackbone.*` call. The strings below are fields on the API's HTTP response body, not SDK error codes.
+
+| HTTP 402 body reason              | Meaning                                    | Action                                                            |
 | --------------------------------- | ------------------------------------------ | ----------------------------------------------------------------- |
 | `tier_quota_exceeded`             | Period credit bundle spent                 | Owner upgrades the org's tier (`stackbone docs tiers` for limits) |
 | `installed_agents_cap_reached`    | Org at `installed agents` cap for its tier | Owner uninstalls an agent or upgrades                             |
 | `members_cap_reached`             | Org at members cap (`free` = 1)            | Owner upgrades to `starter` or higher                             |
-| `published_templates_cap_reached` | Creator at `published agent_templates` cap | Owner upgrades                                                    |
+| `published_templates_cap_reached` | Creator at `published` cap                 | Owner upgrades                                                    |
 
-These are **not retryable** — surface `error.message` and `error.nextActions` to the user verbatim.
+These are **not retryable** — surface the body's message (and any hints it carries) to the user verbatim. The closest SDK-side signal is `ai_credits_exhausted` (an actual catalog code) when a model call hits a spent credit bundle.
 
 ---
 
 ## What this skill does NOT cover
 
-- **Performance tuning** of the agent (cold start, Fly Machine sizing, scale-to-zero pauses). That's a V1+ feature with its own metrics surface.
+- **Performance tuning** of the runtime (cold start, machine sizing, scale-to-zero pauses). That's a feature with its own metrics surface.
 - **Cost analysis** beyond the 402 codes above. The Studio Costs panel covers per-agent breakdown.
-- **Custom OTel queries** against Loki/Tempo. The V1+ observability surface will expose them; for now Studio's Logs tab is the supported path.
+- **Custom OTel queries** against external tracing backends. For now Studio's Logs tab is the supported path.

@@ -1,8 +1,58 @@
-# `agent.yaml` reference
+# Workspace + agent manifests
 
-The manifest of an agent template — the file that gets frozen into the `agent_template_version` row at `stackbone publish` time. Lives at the project root, next to `package.json`.
+A Stackbone project is a **workspace** with two manifest layers:
 
-## Minimal example
+- **Convention scan (primary).** The workspace registry is **derived from the files on disk** — there is no hand-maintained list to keep in sync. `stackbone dev` and `stackbone publish` both read this same convention. Agents are every `agents/<name>/agent.yaml`; workflows are every `workflows/<name>.workflow.ts`. Most projects need no config file at all.
+- **`stackbone.config.ts` (optional override).** A file that default-exports `defineWorkspace({ agents, workflows })`. If present it **wins** over the convention scan; if absent the workspace is discovered from the files. Reach for it only when you need to override what the scan finds; see the **stackbone** skill for the full shape.
+- **`agent.yaml`** — the **per-agent manifest.** Each agent folder under `agents/` carries one (model engine, database paths, RAG embedding model, required connectors, seeded automations) — the manifest the convention scan reads, with its `name:` equal to the folder basename. The schema is `.strict()`.
+
+This page is the field reference for `agent.yaml`.
+
+## Discovery by convention
+
+The workspace shape comes straight from the directory layout:
+
+- **Agents** — every `agents/<name>/agent.yaml`. The manifest's `name:` field is authoritative and **must equal the folder basename**.
+- **Workflows** — every `workflows/<name>.workflow.ts`. The workflow name is the file basename without the `.workflow.ts` suffix; the exported function is `<camelCase(name)>Workflow` (e.g. `qualify-lead.workflow.ts` exports `qualifyLeadWorkflow`).
+
+You scaffold these pieces with `stackbone init` (workspace shell + an optional first piece) and `stackbone add` (each new agent / workflow / workflow-agent) — see the **stackbone-cli** skill. `add` only ever writes new files; it never edits your existing TypeScript and never edits `stackbone.config.ts`.
+
+## `stackbone.config.ts` — the optional workspace override
+
+```ts
+import { defineWorkspace } from '@stackbone/sdk';
+
+export default defineWorkspace({
+  agents: [
+    { name: 'support', dir: 'agents/support' },
+    { name: 'billing', dir: 'agents/billing' },
+  ],
+  workflows: [
+    {
+      name: 'onboarding',
+      module: 'workflows/onboarding.workflow.ts',
+      export: 'onboardingWorkflow',
+    },
+  ],
+});
+```
+
+- **`agents[]`** — `{ name, dir }`. `name` is the agent's folder under `agents/`; `dir` is the path to that folder.
+- **`workflows[]`** — `{ name, module, export }`. `name` is how you address/trigger the workflow; `module` is the `*.workflow.ts` path; `export` is the exported function name inside it.
+
+When this file is absent — the common case — the same `agents[]` / `workflows[]` registry is inferred from the convention scan above, so you only author `stackbone.config.ts` to override that inference.
+
+A workflow declares its input/output **by convention** — sibling `inputSchema` / `outputSchema` exports next to the `'use workflow'` function (see the **stackbone** skill), not in this config. The build harvests them.
+
+---
+
+## `agent.yaml` — the per-agent manifest
+
+The manifest of one agent. Lives in the agent's directory, next to its `package.json`.
+
+> **The schema is `.strict()`.** Any key not listed below makes `stackbone dev` / `stackbone publish` **fail parse** with `Unrecognized key(s)`. Marketplace metadata (description, pricing, category, screenshots) is set in Studio / the create-template flow, **not** here — putting those keys in `agent.yaml` is a parse error, not a no-op.
+
+### Minimal example
 
 ```yaml
 apiVersion: stackbone.ai/v1
@@ -12,182 +62,162 @@ runtime:
   entry: src/index.ts
 ```
 
-That's enough to publish a template. Everything else is opt-in.
+That's enough to publish — every other field has a default. With zero fields beyond `apiVersion` + `name`, the runtime is `node` / `src/index.ts`, the schema is `./src/schema.ts`, migrations live under `./.stackbone/migrations`, `dev.autoMigrate` is on, and `rag.embeddingModel` defaults to `openai/text-embedding-3-small`. The `connections` and `automations` blocks default to empty.
 
-## Capability-rich example
+### Full example
 
 ```yaml
 apiVersion: stackbone.ai/v1
 name: contract-reviewer
-description: Reviews contracts for risky clauses and routes them to a human approver.
+version: v0.2.0 # optional display label, copied verbatim into the build row
+
 runtime:
-  engine: node
-  entry: src/index.ts
+  engine: node # node (default) | bun
+  entry: src/index.ts # path to the agent entry
 
-pricing:
-  model: one_time_fee
-  amount_eur: 49
+database:
+  schema: ./src/schema.ts # your Drizzle pgTable definitions
+  migrations: ./.stackbone/migrations # where db migrate create writes
 
-capabilities:
-  - database
-  - storage
-  - ai
-  - rag
-  - hitl
-  - queues
-  - connections
-  - events
+dev:
+  autoMigrate: true # stackbone dev applies + auto-generates migrations on boot
 
 rag:
-  parser: llamaparse
+  embeddingModel: openai/text-embedding-3-small # only knob rag has now
 
 connections:
-  - provider: gdrive
-    scopes: [drive.readonly]
-  - provider: notion
-    scopes: [read]
+  required: [telegram] # connector accounts the install must connect before use
 
-events:
-  subscribes:
-    - contract.uploaded
-  emits:
-    - contract.approved
-    - contract.rejected
+automations:
+  recipes:
+    - key: reply-on-message # per-install idempotency slug
+      name: Reply to inbound Telegram messages # human label
+      trigger:
+        connector: telegram
+        trigger: message-received
+      handler: onMessage # the named entry the event routes to
+      inputMapping: '{ "chatId": message.chat.id, "text": message.text }' # optional JSONata
+      action: # optional — omit for a trigger-only recipe
+        connector: telegram
+        action: send-message
 
-screenshots:
-  - assets/dashboard.png
-  - assets/approval-flow.png
-
-category: legal
-tags: [contracts, compliance, hitl]
+protocol:
+  required: 1 # minimum Stackbone Agent Protocol contract version (optional floor)
 ```
 
 ## Field reference
 
 ### `apiVersion` (required)
 
-Always `stackbone.ai/v1`. Locks the manifest to this skill's schema; future major versions get explicit migration paths.
+Always the literal `stackbone.ai/v1`. Locks the manifest to this schema; future major versions get explicit migration paths.
 
 ### `name` (required)
 
-The template slug. Must match `[a-z0-9-]+` and be unique within the org. Lowercase, hyphens-only. Cannot be changed after first publish (it's the slug a creator deeplinks).
+The agent name. Lowercase, hyphens-only convention. Inside a workspace it **must equal the agent's folder basename** under `agents/` — the convention scan keys agents on `agents/<name>/agent.yaml` and treats this field as authoritative, so a mismatch is a discovery error.
 
-### `description` (optional, recommended)
+### `version` (optional)
 
-One-paragraph human description. Shown on the marketplace listing. ≤ 280 characters renders better in catalog cards.
+A free-form display label (e.g. `v0.2.0`), max 64 chars, copied verbatim into the matching build row and shown on the install detail page. **Never validated as semver, never unique-constrained** — pure display. The actual version bump at publish time is chosen by `stackbone publish` (see the **stackbone-cli** skill).
 
-### `runtime` (required)
+### `runtime` (optional, defaults to `{ engine: node, entry: src/index.ts }`)
 
 ```yaml
 runtime:
   engine: node # node (default) | bun
-  entry: src/index.ts # path to defineAgent({ invoke }) export
-  dockerfile: ./Dockerfile # optional escape hatch — see below
+  entry: src/index.ts
 ```
 
-- **`engine: node`** uses Node 24 LTS via the platform buildpack. Hot reload in `stackbone dev` and standard wrapper mounting.
-- **`engine: bun`** opts into Bun 1.x — same wrapper, faster cold start in some workloads. Worth trying only after Node works.
-- **`dockerfile:`** — escape hatch. You own the container, the contract (`/invoke`, `/health`, `/schema`) and the wrapper mounting. **Lose hot reload, lose auto-injected env vars verification, lose buildpack CVE scanning consistency.** Only use for system-deps the buildpack doesn't cover (custom OCR binaries, native extensions).
+- **`engine: node`** uses Node 24 LTS via the platform buildpack. Hot reload in `stackbone dev`.
+- **`engine: bun`** is in the enum but **deferred** — the CLI rejects it today with a friendly "set `runtime.engine` to `node`" message. Use `node`.
+- **`customDockerfile`, `systemDeps`, `buildSecrets`, `packageManager`** are declared in the schema only to give a precise rejection message — they are **not supported** today and each errors with its own hint. The buildpack detects the package manager from the lockfile; there is no custom Dockerfile escape hatch yet.
 
-### `pricing` (optional, defaults to free)
+### `database` (optional, has defaults)
 
 ```yaml
-pricing:
-  model: one_time_fee
-  amount_eur: 49
+database:
+  schema: ./src/schema.ts # path to your Drizzle pgTable definitions
+  migrations: ./.stackbone/migrations # path the CLI reads/writes migrations
 ```
 
-MVP supports only `one_time_fee` and free (omit the block). Subscription and pay-per-invocation arrive in V1+ — those rows will be rejected at publish time today.
+Path strings are resolved by the CLI at command time relative to the agent root — the manifest stays declarative. See the **stackbone-cli** skill (`db` reference) for the migration flow.
 
-### `capabilities` (recommended)
+### `dev` (optional, defaults to `{ autoMigrate: true }`)
 
-Declares which SDK modules the agent uses. Maps 1:1 to `client.*` modules. The platform uses this for:
+```yaml
+dev:
+  autoMigrate: true
+```
 
-- Injecting only the env vars the agent needs (don't inject `LLAMA_PARSE_API_KEY` if the agent doesn't list `rag`).
-- Computing tier compatibility (e.g. `connections` is a tier-gated capability).
-- Showing the right buttons in Studio (no HITL inbox link if `hitl` isn't declared).
+When `true`, `stackbone dev` applies pending migrations on boot **and** auto-generates + applies a new one whenever `schema.ts` changes. Set `false` to drive migrations yourself.
 
-Available capabilities: `database`, `storage`, `ai`, `rag`, `hitl`, `queues`, `connections`, `events`, `chat-embed`, `secrets`, `config`.
-
-> If the code uses a capability not declared here, the SDK returns `error.code = 'capability_not_granted'` at runtime. This is deliberate — it prevents accidentally bloating an install's permission scope.
-
-### `rag` (required when `capabilities` includes `rag`)
+### `rag` (optional, defaults to `{ embeddingModel: openai/text-embedding-3-small }`)
 
 ```yaml
 rag:
-  parser: llamaparse # llamaparse | none
+  embeddingModel: openai/text-embedding-3-small
 ```
 
-- **`llamaparse`** opts into the LlamaParse-managed parser for PDFs/Office/images with OCR. Injects `LLAMA_PARSE_API_KEY`, counts against the org's parse quota.
-- **`none`** uses the chunker only — the agent provides text. No LlamaParse cost.
+`rag` configures **only** the embedding model. The RAG tables (`rag_chunks`, the `pgvector` HNSW index) are **provisioned by the platform on every install** — there is no per-agent setup step and no `parser:` key. The block is `.strict()`, so a stale `parser:` fails parse. Agents that never touch `stackbone.rag` can omit the block entirely.
 
-### `connections` (required when `capabilities` includes `connections`)
+### `connections` (optional, defaults to `{ required: [] }`)
 
 ```yaml
 connections:
-  - provider: gdrive
-    scopes: [drive.readonly]
-  - provider: notion
-    scopes: [read]
+  required: [telegram, gmail] # connector ids the agent needs
 ```
 
-Each entry is an OAuth provider the agent will call via `client.connections.from(<provider>).client()`. The org member must authorize each one in Studio's Connections tab **before** installing the agent (the install flow prompts for missing authorizations).
+`required` lists the **connector accounts** the agent depends on. At install time the flow prompts the operator to connect any of these the workspace hasn't connected yet, so the agent's `stackbone.connection(...)` calls have a connection to resolve at runtime. The ids are catalog connector ids — the same ones `stackbone connectors` lists; the format is validated here, while whether an id actually exists is checked by the control plane at publish/install time. Agents that call no connector omit the block. See the **stackbone** skill's connections doc and the **stackbone-cli** skill's `connectors` reference.
 
-Supported providers: `gdrive`, `notion`, `slack`, `gmail`, `github`, `linear`, `hubspot`, `salesforce`. Each provider's available scopes are listed in `stackbone docs connections`.
-
-### `events` (required when `capabilities` includes `events`)
+### `automations` (optional, defaults to `{ recipes: [] }`)
 
 ```yaml
-events:
-  subscribes:
-    - contract.uploaded
-  emits:
-    - contract.approved
-    - contract.rejected
+automations:
+  recipes:
+    - key: reply-on-message # per-install idempotency slug
+      name: Reply to inbound messages # human label, 1–200 chars
+      trigger:
+        connector: telegram
+        trigger: message-received # an event id on that connector
+      handler: onMessage # the named entry the event routes to
+      inputMapping: '{ "chatId": message.chat.id, "text": message.text }' # optional JSONata
+      outputMapping: '{ "ok": reply.delivered }' # optional JSONata
+      action: # optional — omit for a trigger-only recipe
+        connector: telegram
+        action: send-message
 ```
 
-- **`subscribes`** — event types this agent listens to. The org's event bus fan-outs to every agent that subscribes. The agent receives them in `defineAgent({ events: { 'contract.uploaded': handler } })`.
-- **`emits`** — event types this agent produces. The platform uses this for the visual fan-out graph in Studio (which agents talk to which).
+Each recipe is a ready-made automation the **install flow seeds** as an ordinary, editable automation (the operator can change it afterwards). It mirrors the pipeline `trigger → inputMapping → handler → outputMapping → action`:
 
-Event types are arbitrary strings; convention is `<noun>.<past-tense-verb>` (e.g. `invoice.created`, `lead.qualified`).
+- **`key`** — a slug; the per-install idempotency key the seeder upserts on, so re-publishing updates the same automation instead of duplicating it.
+- **`name`** — human label (1–200 chars) shown in the install's automations list.
+- **`trigger`** — `{ connector, trigger }`: the catalog event that fires the recipe.
+- **`handler`** — the named entry the event routes to (for an eve agent, the routing target is the agent itself).
+- **`inputMapping` / `outputMapping`** — optional JSONata expressions applied before and after the handler (the same engine the runtime applies in production).
+- **`action`** — optional `{ connector, action }`: a connector action run with the handler's (mapped) output. Omit it for a trigger-only recipe.
 
-### `chat-embed` capability
+Every block is `.strict()` — a mistyped key is a loud parse error.
 
-Set this if the agent will be embedded as a chat widget on a third-party site via `agent_embed`. Requires:
-
-- `defineAgent({ invoke })` to accept `{ session_id: string, message: string }`.
-- The agent to own its conversation state (Neon table).
-
-The marketplace lists the agent as chat-embeddable; the org member can create one `agent_embed` per install and embed it on their domain via `<script>` tag.
-
-### `screenshots` (optional)
+### `protocol` (optional, no default)
 
 ```yaml
-screenshots:
-  - assets/dashboard.png
-  - assets/approval-flow.png
+protocol:
+  required: 1
 ```
 
-Paths relative to the project root. Bundled into the template artifact, served by the marketplace's CDN. Recommended: 1280×720 PNG/JPG, ≤ 500 KB each.
-
-### `category` / `tags` (optional)
-
-Used for marketplace filtering. Free-form; the platform reconciles them against the canonical taxonomy.
+An optional floor on the negotiated Stackbone Agent Protocol contract version. When the negotiated contract version is below `protocol.required`, every gated surface call returns `contract_version_unsupported`. Omit it to fall back to the SDK's implicit minimum. **This is the only capability/protocol knob in the manifest** — capability gating is negotiated through the contract handshake, not declared as a field.
 
 ## What you can't put here
 
-- **LLM API keys** (`OPENROUTER_API_KEY`, anything else). Stackbone provisions per-install sub-keys; the creator does not pick the model gateway.
-- **Database URLs**, **S3 credentials**, **QStash tokens**. Same reason — platform-injected.
-- **Custom `port:`**. The wrapper binds to whatever Fly assigns and proxies; the agent code never sees the port.
-- **`replicas:`**, **`memory:`**, **`cpu:`**. Resource sizing is tier-driven at install time, not template-declared.
-- **`min-sdk-version`** (yet). Today the buildpack pins the SDK by the project's `package.json` dependency. A `requires.sdk` field is on the roadmap.
+These keys are **not** part of the on-disk manifest. Some are marketplace metadata set elsewhere, some are deferred — either way, the `.strict()` schema rejects them at parse time:
+
+- **`description`, `pricing`, `category`, `tags`, `screenshots`** — marketplace listing metadata. Set in Studio, not `agent.yaml`.
+- **`capabilities:`** — there is no capability list in the manifest. Surface availability is gated by the negotiated contract (see `protocol` above), not declared here.
+- **`events:`** — no event-bus surface ships, so there is no manifest field for it. (`connections:` and `automations:` **are** valid blocks now — see above.)
+- **`rag.parser`** — removed; `rag` only has `embeddingModel`.
+- **`runtime.dockerfile` / `runtime.systemDeps` / `runtime.buildSecrets` / `runtime.packageManager`** — deferred; each errors with its own message.
+- **LLM keys, database URLs, S3 credentials** — platform-injected, never declared. (See the injected-env table in the **stackbone** skill.)
+- **`port:` / `replicas:` / `memory:` / `cpu:`** — the runtime binds the port; resource sizing is tier-driven at install time.
 
 ## Validation
 
-`stackbone publish` validates `agent.yaml` against the schema before any network I/O. To validate without publishing:
-
-```sh
-stackbone docs agent-yaml --validate
-```
-
-(Reads the local `agent.yaml`, returns `{ valid: true }` or the list of errors with field paths.)
+`stackbone publish` validates the manifest against the schema before any network I/O — `stackbone publish --dry-run` runs that validation (plus build + scan + sign) without pushing. `stackbone dev` also parses the manifest on boot, so a schema error surfaces the moment you start the emulator. See the **stackbone-cli** skill for both.

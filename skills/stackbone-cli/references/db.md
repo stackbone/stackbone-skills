@@ -1,17 +1,22 @@
 # `stackbone db`
 
-Manage Drizzle migrations and inspect data on the agent's dedicated Neon Postgres (or the local Postgres `stackbone dev` boots in docker-compose).
+Two kinds of database verb live under `stackbone db`:
+
+- **Migration verbs** (`migrate up` / `create` / `status`) are **drizzle-native** — they run locally against `STACKBONE_POSTGRES_URL` (the connection string `stackbone dev` exports; export it yourself otherwise). A missing URL exits `3` (`no_project`).
+- **Explorer verbs** (`query` / `schemas` / `table`) are **read-only HTTP reads** against one installation through Studio — the local-dev install by default, or `--agent <id>`.
 
 ## Subcommands
 
-| Command                                            | Description                                                                                                                                    |
-| -------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
-| `stackbone db migrate create <name>`               | Generate a new timestamped migration file under `migrations/`.                                                                                 |
-| `stackbone db migrate up [--to <version>] [--all]` | Apply pending migrations safely with an advisory lock and journal.                                                                             |
-| `stackbone db migrate status`                      | List migrations: applied (with timestamps) vs pending.                                                                                         |
-| `stackbone db studio`                              | Launch the embedded read-only DB explorer.                                                                                                     |
-| `stackbone db add-rag --name <collection>`         | Declarative shortcut: generate the schema + indexes a new RAG collection needs (`_rag_documents`, `_rag_chunks` with `pgvector` + `tsvector`). |
-| `stackbone db query "<sql>" [--writable]`          | Run a single SQL statement. Default is read-only; `--writable` lets through DDL/DML — destructive, requires `--yes` to skip confirmation.      |
+| Command                                    | Description                                                                                                                    |
+| ------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------ |
+| `stackbone db migrate create <name>`       | Diff `src/schema.ts` against the journal and write a new SQL migration under `.stackbone/migrations/`.                         |
+| `stackbone db migrate up [--target <tag>]` | Apply every pending migration safely with an advisory lock + journal. `--target <tag>` stops after that migration (inclusive). |
+| `stackbone db migrate status`              | Classify each migration as `applied` / `pending` / `drifted`.                                                                  |
+| `stackbone db query <sql>`                 | Run an ad-hoc **single SELECT** against the install. SQL from the positional, `--file <path>`, or stdin.                       |
+| `stackbone db schemas`                     | List the schemas and tables visible to the install, with row estimates.                                                        |
+| `stackbone db table <schema> <table>`      | Browse one table with cursor pagination (`--limit` 1-200 default 50, `--cursor`, `--order asc\|desc`).                         |
+
+> There is **no** `db add-rag` command. The RAG schema is platform-provisioned per install (no creator step). Schema changes go through `db migrate create` — `db query` is **read-only** and the backend rejects anything that isn't a single SELECT.
 
 ## Target resolution
 
@@ -65,17 +70,16 @@ CREATE INDEX contracts_title_trgm_idx ON contracts USING gin (title gin_trgm_ops
 ## Subcommand: `migrate up`
 
 ```sh
-# Apply all pending in order
-stackbone db migrate up --all --json
+# Apply every pending migration in order
+stackbone db migrate up --json
 
-# Apply up to a specific version
-stackbone db migrate up --to 20260518091500
-
-# Apply one explicit file
-stackbone db migrate up 20260518091500_create-contracts.sql
+# Stop after applying the migration with this tag (inclusive)
+stackbone db migrate up --target 20260518091500_create-contracts
 ```
 
-**Idempotency.** Re-running after a partial failure resumes from the last successfully applied migration. The journal table `_migrations` records every successful application.
+There is no `--all` flag (applying all pending is the default) and no per-file positional — staged rollouts use `--target <tag>`.
+
+**Idempotency.** Re-running after a partial failure resumes from the last successfully applied migration. The journal records every successful application; the JSON payload returns `{ applied, skipped }` with each entry's `tag` and `appliedAt`.
 
 ## Subcommand: `migrate status`
 
@@ -95,60 +99,49 @@ stackbone db migrate status --json
 }
 ```
 
-## Subcommand: `db studio`
+> **RAG schema is platform-provisioned.** There is no `db add-rag` command anymore — `rag_chunks`, the `pgvector` HNSW index and the async-ingest jobs table are created on every install by the platform migrator. `stackbone.rag` works without you migrating anything. Don't hand-write that schema.
+
+## Subcommand: `query` (read-only)
 
 ```sh
-stackbone db studio
-# Opens http://localhost:4243 (Studio bottom panel embeds it; this is the standalone view)
+# SQL as the positional (psql -c style)
+stackbone db query "select id, status from runs order by created_at desc limit 20" --json
+
+# Or from a file / stdin
+stackbone db query --file ./report.sql --json
+echo "select count(*) from users" | stackbone db query --json
 ```
 
-- **Read-only by default.** Connection uses a `stackbone_viewer` role with `SET default_transaction_read_only = on` and `statement_timeout = 5s` enforced at the DB role level, not the UI.
-- **Pagination via cursor.** Tables open to the first 50 rows, cursor-paginated.
-- **SQL console.** Single statement only; the parser validates `SELECT` / `EXPLAIN` shape; the role enforces the rest.
+The backend enforces **single SELECT only** — a write or multiple statements is rejected. Rows truncate at 1000 (`truncated: true` in the payload). The JSON payload is `{ columns, rows, truncated, duration_ms }`.
 
-To write from `db studio`, exit it and use a migration. There is no "edit row" affordance — that's a deliberate safety choice.
-
-## Subcommand: `db add-rag`
+## Subcommand: `schemas`
 
 ```sh
-stackbone db add-rag --name contracts
+stackbone db schemas --json   # { schemas: [{ name, tables: [{ name, estimated_rows }] }] }
 ```
 
-Generates a migration that creates the standard RAG schema for a new collection:
-
-- `_rag_documents` (id, source_url, parsed_at, raw_text, metadata jsonb)
-- `_rag_chunks` (id, document_id, content, embedding `vector(1536)`, search_tsv `tsvector`)
-- Indexes: HNSW on `embedding` (`vector_cosine_ops`), GIN on `search_tsv`, B-tree on `document_id`
-
-The collection is then addressable via `client.rag.from('contracts')` in the agent code.
-
-## Subcommand: `db query`
+## Subcommand: `table` (cursor pagination)
 
 ```sh
-# Read-only by default
-stackbone db query "SELECT count(*) FROM contracts" --json
-
-# Mutate (requires --writable and --yes for destructive ops)
-stackbone db query "ALTER TABLE contracts ADD COLUMN status text" --writable --yes
+stackbone db table public users --limit 50 --json
+stackbone db table public users --cursor "<nextCursor>" --order desc --json
 ```
 
-Single-statement only. For multi-statement work, use a migration.
-
-⚠️ **destructive** when `--writable` is set. The CLI asks for confirmation unless `--yes` is passed. Cross-org accidents are prevented by exit code `3` requiring a linked project.
+Payload: `{ columns, rows, cursor_column, nextCursor, prevCursor }`. Walk pages with `nextCursor`.
 
 ## Exit codes
 
-| Code | When                                                                                                                      |
-| ---- | ------------------------------------------------------------------------------------------------------------------------- |
-| 0    | Success                                                                                                                   |
-| 1    | SQL error, migration error, parse failure                                                                                 |
-| 2    | Not authenticated                                                                                                         |
-| 3    | No project linked / no target resolved                                                                                    |
-| 5    | Permission denied (role lacks privilege, e.g. trying to `db query --writable` against a cloud agent without `owner` role) |
+| Code | When                                                   |
+| ---- | ------------------------------------------------------ |
+| 0    | Success                                                |
+| 1    | SQL error, migration error, parse failure              |
+| 2    | Not authenticated                                      |
+| 3    | No project linked / no target resolved                 |
+| 5    | Permission denied (role lacks privilege on the target) |
 
 ## Common mistakes
 
 - **Editing an applied migration file.** Always create a new one. The journal table compares filename + checksum; editing an applied file makes `migrate status` flag a checksum mismatch and refuse to proceed.
-- **Forgetting to apply migrations in production after `publish`.** The wrapper applies them on the first invocation after the new image boots; if you have warm machines, they continue serving the old version until they recycle. Force with `stackbone db migrate up --all --agent <id>` against the cloud agent.
-- **Hand-writing `pgvector` indexes with the wrong distance op.** A query using `<->` (cosine) against an index built with `<#>` (inner product) does a sequential scan and returns wrong order. Use `stackbone db add-rag` to get this right by default.
-- **Using `db query --writable` for things a migration would do.** It works, but it leaves the schema in a state the `migrations/` history doesn't describe. The next `publish` to a fresh install will recreate the schema without your hand-edits.
+- **Forgetting to apply migrations in production after `publish`.** The wrapper applies them on the first invocation after the new image boots; if you have warm machines, they continue serving the old version until they recycle. The migration verbs run drizzle-native against `STACKBONE_POSTGRES_URL`, not via `--agent`; point that env var at the cloud agent's database and run `stackbone db migrate up` to force-apply.
+- **Hand-writing the RAG `pgvector` schema.** Don't — `stackbone.rag`'s tables and indexes are platform-provisioned on every install with the operator/opclass paired correctly. Hand-rolling them drifts from what the SDK expects.
+- **Changing the schema outside a migration.** Migrations are the source of truth — anything the schema history should describe belongs in `migrations/`, otherwise the next `publish` to a fresh install recreates the schema without your changes.

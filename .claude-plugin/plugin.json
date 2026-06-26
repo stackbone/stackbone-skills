@@ -1,7 +1,7 @@
 {
   "name": "stackbone",
-  "description": "Agent skills for Stackbone: the App Store + hosting for AI agents. Creators publish containerized agent templates; organizations install them as agents that run with their own Postgres (Neon + pgvector), object storage (R2), queues (QStash), HITL inbox and LLM gateway (OpenRouter). This plugin gives coding agents the full Stackbone surface: @stackbone/sdk (database, storage, AI, RAG, queues, approval), CLI for scaffolding and publishing (init, dev, publish, db migrate), and diagnostics for HITL, runs, logs, secrets and metrics.",
-  "version": "0.1.0",
+  "description": "Agent skills for Stackbone: the platform for building and hosting durable AI agents. Creators author a workspace of durable agents and workflows; organizations install them as agents that run in their own cloud with Postgres (Drizzle), object storage, durable execution (Redis), a human-in-the-loop inbox and an LLM gateway (OpenRouter). This plugin gives coding agents the full Stackbone surface: @stackbone/sdk (the ambient stackbone client — database, storage, AI, RAG, approval, prompts, secrets, config, plus stackbone.agent(id) and stackbone.connection(id)), @stackbone/sdk/workflow (durable workflows + requestApproval human-in-the-loop), @stackbone/sdk/connect (Stackbone Connect), the CLI for scaffolding, publishing, workflows, runs and HITL, and diagnostics for runs, logs, HITL and connectors.",
+  "version": "0.4.1",
   "author": {
     "name": "Stackbone",
     "url": "https://stackbone.ai"
@@ -14,14 +14,14 @@
     "ai-agents",
     "agent-marketplace",
     "coding-agents",
-    "langgraph",
-    "hono",
+    "eve",
+    "durable-workflows",
+    "workflow-sdk",
+    "durable-execution",
     "postgres",
     "pgvector",
     "rag",
     "hitl",
-    "openrouter",
-    "neon",
-    "qstash"
+    "openrouter"
   ]
 }

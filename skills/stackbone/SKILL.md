@@ -1,301 +1,427 @@
 ---
 name: stackbone
 description: >-
-  Use this skill when writing the inside of a Stackbone agent template with @stackbone/sdk:
-  database CRUD with Drizzle over Neon Postgres, file uploads to Cloudflare R2 via client.storage,
-  LLM chat / embeddings through OpenRouter via client.ai, RAG ingest + hybrid search via client.rag,
-  cross-container push jobs and schedules via client.queues, human-in-the-loop pauses via client.approval,
-  reading injected secrets / config / connections via client.secrets / client.config / client.connections,
-  emitting events to the org event bus via client.events, or declaring the agent's manifest in agent.yaml.
-  Trigger on requests like: build an agent, add a tool to the agent, store user data, upload an image,
-  call an LLM, ingest docs for RAG, pause until a human approves, send an SMS through a queued job,
-  add a new entry to agent.yaml, or implement defineAgent({ invoke }) in src/index.ts.
-  For CLI tasks (init, dev, publish, db migrate), use the stackbone-cli skill instead.
+  Use this skill when writing the inside of a Stackbone workspace with @stackbone/sdk and eve:
+  the workspace is discovered by convention from the files on disk (agents/<name>/agent.yaml +
+  workflows/<name>.workflow.ts), with an optional stackbone.config.ts override via
+  defineWorkspace({ agents, workflows }) that wins when present,
+  authoring a durable eve agent (agent.ts with a model + build.externalDependencies, instructions.md,
+  tools under tools/ via defineTool from 'eve/tools'), writing durable workflows as 'use workflow' /
+  'use step' functions with sibling inputSchema/outputSchema, and reaching the ambient `stackbone` client
+  from inside a tool's execute() or a workflow step — stackbone.database (Drizzle over Neon Postgres),
+  stackbone.storage (file uploads), stackbone.ai (LLM chat / embeddings via OpenRouter), stackbone.rag
+  (ingest + hybrid search), stackbone.config / stackbone.secrets / stackbone.prompts, stackbone.agent(id)
+  to call a sibling agent, and stackbone.connection(id) to call a third-party connector — plus
+  human-in-the-loop pauses via requestApproval() from @stackbone/sdk/workflow.
+  Trigger on requests like: build an agent, add a tool, write a workflow, store user data, upload a file,
+  call an LLM, ingest docs for RAG, pause until a human approves, call another agent, call a connector,
+  read dynamic config, or add an optional stackbone.config.ts override on top of convention discovery.
+  For CLI tasks (init, dev, publish, db migrate, runs, hitl, trigger), use the stackbone-cli skill instead.
   For triage of errors and stuck runs, use the stackbone-debug skill.
 license: MIT
 metadata:
   author: stackbone
-  version: '0.1.0'
+  version: '0.4.1'
   organization: Stackbone
-  date: May 2026
+  date: June 2026
 ---
 
 # Stackbone SDK skill
 
-This skill covers writing code **inside** a Stackbone agent template — what the creator builds with `@stackbone/sdk` and declares in `agent.yaml`. For everything around the agent (scaffolding, dev emulator, publishing, db migrations) use the **stackbone-cli** skill.
+This skill covers writing code **inside** a Stackbone workspace — what the creator authors with `@stackbone/sdk` and `eve`. The workspace is discovered by convention from the files on disk (`agents/<name>/agent.yaml` + `workflows/<name>.workflow.ts`); an optional `stackbone.config.ts` is an override that wins when present. For everything around the workspace (scaffolding, the dev emulator, publishing, db migrations, triggering runs) use the **stackbone-cli** skill.
 
-## The mental model in three sentences
+## The mental model in four sentences
 
-- A creator writes a single file, `src/index.ts`, exporting `defineAgent({ invoke })`. Stackbone's platform-managed wrapper (`stackbone serve`) mounts it against the canonical contract — `POST /invoke`, `GET /health`, `GET /schema` — so the creator never writes HTTP code, never picks a port, never adds a Dockerfile.
-- The agent runs as a Docker container on Fly Machines, one container **per agent instance** (an `agent`, not an `agent_template`). Each instance has its own dedicated Neon Postgres, its own R2 bucket, its own QStash signing keys, and its own OpenRouter sub-key — all injected as env vars at boot.
-- All persistence is Postgres. Relational data, vectors (`pgvector`), full-text (`tsvector`), KV cache (table with `expires_at`) and durable queues (table `_queue_jobs` consumed with `FOR UPDATE SKIP LOCKED`) live in the same Neon. There is no Redis, no separate vector DB, no separate KV store inside the agent.
+- A workspace is a project that contains **agents** and **workflows**, **discovered by convention from the files on disk**: every `agents/<name>/agent.yaml` is an agent and every `workflows/<name>.workflow.ts` is a workflow. An optional `stackbone.config.ts` (default-exporting `defineWorkspace({ agents, workflows })`) is an **override that wins when present** — most projects need none. Each agent is a directory under `agents/<name>/`; each workflow is a `*.workflow.ts` module.
+- An **agent** is a durable [eve](https://eve.dev/docs/introduction) agent: a model + instructions + tools that hold a conversation across turns. You author it as files under `agents/<name>/agent/` — `agent.ts` (model + build config), `instructions.md` (the system prompt), and one tool per file under `tools/`. The runtime serves it over a signed `/eve/v1/*` session API; you never write HTTP code.
+- A **workflow** is durable, replayable code: a plain async function marked `'use workflow'` whose individual side-effects are marked `'use step'`. Each step is a checkpoint — kill the runtime mid-run and it resumes from the last completed step. Workflows run on the [Workflow SDK](https://workflow-sdk.dev/docs).
+- All persistence lives in the agent's own Postgres (Neon): relational data, vectors (`pgvector`), full-text (`tsvector`), the approvals inbox, the prompt catalog, dynamic config. From any tool's `execute()` or any workflow step you reach it through the **ambient `stackbone` client** — `import { stackbone } from '@stackbone/sdk'` — with no `createClient()` and no credential wiring.
 
 ## Quick setup
 
 ### 1. Scaffold (CLI)
 
-Use the **stackbone-cli** skill — `stackbone init --starter <slug> <new-name>` copies the chosen starter, find-and-replaces the package name, and leaves a runnable Node project. The skill auto-installs into `.claude/skills/` of the new project.
+Use the **stackbone-cli** skill. `stackbone init` is **workspace-first and offline by default** — it emits only the workspace shell (an `agents/` folder, a `workflows/` folder, `package.json`, `tsconfig.json`, an `.npmrc`, `.gitignore`, a README, and the coding-agent skills) with **no `stackbone.config.ts` and no agent**, and runs no network call. A first piece is opt-in via `--with`: `empty` (shell only — the default), `agent`, `workflow`, or `workflow-agent`. Only the agent-creating kinds (`agent`, `workflow-agent`) touch the network — they register the agent in the control plane, so you must be signed in; `empty` and `workflow` are fully offline. Once you have a workspace, add more pieces with `stackbone add agent|workflow|workflow-agent <name>` — see the **stackbone-cli** skill for the full command surface.
 
-### 2. Install the SDK
+### 2. Install the SDK (and the eve peers you use)
 
 ```sh
-pnpm install @stackbone/sdk
+npm install @stackbone/sdk
 ```
 
-The version range is pinned by the starter; bump only when the SDK release notes say so.
+`@stackbone/sdk` declares `eve` and `workflow` as **optional peer dependencies**. Install the ones your workspace actually uses:
 
-### 3. Create the client
+```sh
+npm install eve                 # to author an agent (agent.ts / tools)
+npm install workflow            # to author a workflow that pauses for approval
+npm install @ai-sdk/openai-compatible   # to bind the OpenRouter-compatible model
+```
+
+A tool-only agent that never imports `@stackbone/sdk/workflow` or `@stackbone/sdk/connect` never loads those peers, so `import { stackbone } from '@stackbone/sdk'` stays peer-free.
+
+### 3. Declare the workspace (optional)
+
+You usually **do not** write this. The workspace is discovered by convention: every `agents/<name>/agent.yaml` (whose `name:` equals the folder basename) is an agent, and every `workflows/<name>.workflow.ts` (exporting `<camelCase(name)>Workflow`) is a workflow. Add a `stackbone.config.ts` only when you need to **override** that scan — when present it wins over the convention:
 
 ```ts
-// src/index.ts
-import { createClient, defineAgent } from '@stackbone/sdk';
+// stackbone.config.ts — OPTIONAL override; only needed when convention discovery isn't enough
+import { defineWorkspace } from '@stackbone/sdk';
 
-const client = createClient(); // no args — reads injected env vars
-
-export default defineAgent({
-  async invoke(input, ctx) {
-    const { data, error } = await client.database.from('users').select().where(/* ... */).all();
-
-    if (error) return ctx.fail(error.code, error.message);
-    return ctx.ok({ users: data });
-  },
-});
-```
-
-> Do not import `@stackbone/sdk` in HTTP middleware, do not call `createClient()` per request, do not pass connection strings explicitly. The platform injects everything; the client is a singleton.
-
-## Injected environment variables (read by the SDK)
-
-| Category             | Variables                                                               | Notes                                                                      |
-| -------------------- | ----------------------------------------------------------------------- | -------------------------------------------------------------------------- |
-| Identity             | `AGENT_ID`, `AGENT_TEMPLATE_ID`, `ORGANIZATION_ID`, `AGENT_CONFIG`      | Stable for the life of the instance                                        |
-| Persistence          | `STACKBONE_POSTGRES_URL`                                                | Neon with `pgvector` + `tsvector` + cache table + `_queue_jobs` table      |
-| Storage              | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `S3_ENDPOINT`             | R2 in prod, MinIO in `stackbone dev`                                       |
-| LLM                  | `OPENROUTER_API_KEY`, `OPENROUTER_BASE_URL`                             | Stackbone sub-key with monthly limit. Passthrough cost, no markup.         |
-| RAG parser (opt-in)  | `LLAMA_PARSE_API_KEY`                                                   | Only injected if `rag.parser: llamaparse` in `agent.yaml`                  |
-| Cross-container push | `QSTASH_TOKEN`, `QSTASH_CURRENT_SIGNING_KEY`, `QSTASH_NEXT_SIGNING_KEY` | Publisher + 2 keys for HMAC rotation                                       |
-| Observability        | `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_RESOURCE_ATTRIBUTES`               | Auto-instrumented (`pg`, `aws-sdk`, `undici`)                              |
-| Control plane        | `PLATFORM_API_URL`, `PLATFORM_API_KEY`                                  | Used by the SDK's facades (approval, secrets, connections, config, events) |
-
-**Never hardcode any of these. Never ask the user for them. Never set them in `agent.yaml`.** They are platform-managed.
-
-## Module reference
-
-All client methods return `{ data, error }`. Examples must show both branches.
-
-| Module                 | What it wraps                                                                                      | When to use it                                                                                                                                                                               |
-| ---------------------- | -------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `client.database`      | Drizzle ORM + `postgres-js` over the agent's Neon                                                  | Any structured data the agent owns: users, jobs, messages, embeddings (with `pgvector`), full-text search (with `tsvector`). See [database/sdk-integration.md](database/sdk-integration.md). |
-| `client.storage`       | `@aws-sdk/client-s3` + `_storage_objects` metadata table                                           | Files: uploads, downloads, signed URLs, listing. R2 in prod, MinIO in dev.                                                                                                                   |
-| `client.ai`            | `openai` SDK with OpenRouter base URL                                                              | LLM completions, chat, embeddings, vision. 300+ models. **Stream by default for long completions.**                                                                                          |
-| `client.rag`           | LlamaParse (opt-in) + chunker + embeddings via `client.ai` + `pgvector` + `tsvector` hybrid search | Document ingest + retrieval. Always pair with `agent.yaml`'s `rag.parser` declaration.                                                                                                       |
-| `client.queues`        | `@upstash/qstash` publisher + Hono receiver with HMAC                                              | Async work outside the request lifecycle, scheduled jobs, cross-container fan-out.                                                                                                           |
-| `client.observability` | `@opentelemetry/sdk-node` + auto-instrumentations                                                  | Already auto-wired. Use `client.observability.span(name, fn)` to add custom spans.                                                                                                           |
-| `client.approval`      | Stackbone HITL queue + workflow resume                                                             | Pause a run until a human decides (approve / reject / edit payload). The pause is **durable** — the agent process can die and come back.                                                     |
-| `client.secrets`       | Encrypted secret vault per agent instance                                                          | Read user-managed secrets (e.g. third-party API keys the org member added in Studio). System secrets (DATABASE*URL, AWS*\*) are env vars, not `client.secrets` reads.                        |
-| `client.config`        | Dynamic `AGENT_CONFIG` jsonb the org member edits in Studio                                        | Read-only at runtime. Use for feature flags, per-install tuning, branding.                                                                                                                   |
-| `client.connections`   | OAuth connections the org has authorized (Notion, GDrive, Slack, ...)                              | Get fresh OAuth tokens, listed in `agent.yaml`'s `connections:`.                                                                                                                             |
-| `client.events`        | Org event bus                                                                                      | Emit a typed event from this agent that other agents in the same org can subscribe to.                                                                                                       |
-
-## agent.yaml — the manifest
-
-The recipe published as `agent_template`. See [agent-yaml.md](agent-yaml.md) for the full reference. Minimal example:
-
-```yaml
-apiVersion: stackbone.ai/v1
-name: support-triage
-runtime:
-  engine: node
-  entry: src/index.ts
-```
-
-A capability-rich example with RAG, HITL, queues, connections and a one-time fee:
-
-```yaml
-apiVersion: stackbone.ai/v1
-name: contract-reviewer
-description: Reviews contracts for risky clauses and routes them to a human approver.
-runtime:
-  engine: node
-  entry: src/index.ts
-pricing:
-  model: one_time_fee
-  amount_eur: 49
-capabilities:
-  - rag
-  - hitl
-  - queues
-rag:
-  parser: llamaparse
-connections:
-  - provider: gdrive
-    scopes: [drive.readonly]
-events:
-  subscribes: [contract.uploaded]
-  emits: [contract.approved, contract.rejected]
-```
-
-> **Do not declare LLM keys, database URLs, queue tokens or storage credentials.** Stackbone injects them. The manifest is for **intent** (what capabilities the agent uses) and **identity** (name, pricing, description).
-
-## The `defineAgent` contract
-
-```ts
-export default defineAgent({
-  // Required: the only entrypoint a request can hit.
-  async invoke(input, ctx) {
-    // input: parsed and validated against the schema you export below
-    // ctx.run.id, ctx.run.trigger ('manual' | 'webhook' | 'cron' | 'event' | 'embed')
-    // ctx.organizationId, ctx.agentId
-    // ctx.ok(data), ctx.fail(code, message)
-  },
-
-  // Optional: the JSON schema that gates GET /schema and validates `input`.
-  // Required for chat-capable agents (must accept { session_id, message }).
-  schema: {
-    /* JSON Schema */
-  },
-
-  // Optional: subscribe to events the org emits.
-  events: {
-    'contract.uploaded': async (event, ctx) => {
-      /* ... */
-    },
-  },
-
-  // Optional: scheduled callbacks (also expressible via QStash).
-  schedules: [
+export default defineWorkspace({
+  agents: [
+    { name: 'support', dir: 'agents/support' },
+    { name: 'billing', dir: 'agents/billing' },
+  ],
+  workflows: [
     {
-      cron: '0 9 * * *',
-      handler: async (ctx) => {
-        /* ... */
-      },
+      name: 'onboarding',
+      module: 'workflows/onboarding.workflow.ts',
+      export: 'onboardingWorkflow',
     },
   ],
 });
 ```
 
-`GET /health` and `GET /schema` are mounted by the wrapper — the creator never writes them. `POST /invoke` is the only request path. If the agent needs to expose more operations, **collapse them into `invoke` with a discriminated `action` field on `input`** (see the multi-action starter pattern). Do not add HTTP routes — they will not be reachable from the platform.
+- An **agent** entry is `{ name, dir }`. The `name` is the agent's folder under `agents/`; `dir` is the path to that folder.
+- A **workflow** entry is `{ name, module, export }`. The `name` is how you address/trigger it (`stackbone workflows schema <name>`, `POST /api/workflows/<name>/start`); `module` is the `*.workflow.ts` path; `export` is the exported function name inside it.
 
-## Patterns that matter
+## Authoring an eve agent
 
-### Always destructure `{ data, error }`
+An agent lives under `agents/<name>/agent/`:
 
-```ts
-const { data, error } = await client.database.from('users').select().all();
-if (error) return ctx.fail('db_read_failed', error.message);
-return ctx.ok({ users: data });
+```
+agents/support/
+  package.json            ← name: "support"
+  agent/
+    agent.ts              ← model + build config (default export = defineAgent)
+    instructions.md       ← the system prompt
+    tools/
+      read_config.ts      ← one tool per file (default export = defineTool)
+      escalate.ts
 ```
 
-Skipping the `error` branch trains the agent to swallow failures. The error envelope is structured (`{ code, message, details, retryable }`) — use `code` to branch on known cases.
-
-### Inserts take an array
+### `agent.ts` — the model + build config
 
 ```ts
-await client.database.from('users').insert([{ email, name }]); // ✅
-await client.database.from('users').insert({ email, name }); // ❌ rejected
-```
+// agents/support/agent/agent.ts
+import { createOpenAICompatible } from '@ai-sdk/openai-compatible';
+import { defineAgent } from 'eve';
 
-### Storage objects need both `url` and `key`
-
-```ts
-const { data, error } = await client.storage
-  .from('avatars')
-  .upload(file, { contentType: 'image/png' });
-
-// Save both: `url` for serving, `key` for delete/move/list
-await client.database.from('users').update({ avatar_url: data.url, avatar_key: data.key }).where(...);
-```
-
-### Stream long LLM completions
-
-```ts
-const stream = await client.ai.chat.completions.create({
-  model: 'anthropic/claude-sonnet-4.5',
-  messages: [...],
-  stream: true,
+// Stackbone injects the org's managed OpenRouter sub-key as OPENROUTER_API_KEY.
+// OpenRouter exposes an OpenAI-compatible API, so bind it as a provider instance.
+// eve routes a provider instance directly (a BARE model string would route
+// through the Vercel AI Gateway, which Stackbone does not use).
+const openrouter = createOpenAICompatible({
+  name: 'openrouter',
+  baseURL: process.env.OPENROUTER_BASE_URL ?? 'https://openrouter.ai/api/v1',
+  apiKey: process.env.OPENROUTER_API_KEY,
 });
 
-for await (const chunk of stream) {
-  yield chunk.choices[0]?.delta?.content;
+export default defineAgent({
+  model: openrouter('anthropic/claude-haiku-4.5'),
+  // A custom provider carries no context-window metadata, so declare it.
+  modelContextWindowTokens: 200_000,
+  // Keep @stackbone/sdk (and eve) external so the agent shares ONE invocation
+  // context. Inlining the SDK gives the agent a second copy of the SDK's
+  // invocation-context AsyncLocalStorage and per-run logs arrive with no run id.
+  // `stackbone publish` enforces this — an agent that omits it aborts the build.
+  build: { externalDependencies: ['@stackbone/sdk', 'eve*'] },
+});
+```
+
+> Import `defineAgent` from **`eve`** (the agent's model + build config) — not from `@stackbone/sdk`.
+
+The agent's name comes from the `name:` field in **`agents/<name>/agent.yaml`** — and it **must equal the folder basename** (that match is the key the convention scan resolves agents by). You do not write the name in `agent.ts`. The system prompt lives in `agents/<name>/agent/instructions.md`.
+
+### A tool — `agents/<name>/agent/tools/<tool>.ts`
+
+One tool per file, default-exporting `defineTool` from `eve/tools`. The tool's `execute()` is where you reach the ambient `stackbone` client.
+
+```ts
+// agents/support/agent/tools/read_config.ts
+import { defineTool } from 'eve/tools';
+import { stackbone, z } from '@stackbone/sdk';
+
+export default defineTool({
+  description:
+    "Return the agent's current dynamic configuration. Call to confirm how the " +
+    'agent is configured before replying.',
+  inputSchema: z.object({}),
+  async execute() {
+    const greeting = await stackbone.config.get('greeting');
+    const all = await stackbone.config.getAll();
+    return {
+      greeting: greeting.error ? null : greeting.data,
+      all: all.error ? null : all.data,
+    };
+  },
+});
+```
+
+A tool with arguments destructures them from the `execute` parameter (validated against `inputSchema`):
+
+```ts
+export default defineTool({
+  description: 'Escalate this lead to a human sales rep.',
+  inputSchema: z.object({
+    leadId: z.string().describe('CRM contact id'),
+    reason: z.string().describe('Short reason for the hand-off'),
+  }),
+  async execute({ leadId, reason }) {
+    await stackbone.database.insert(escalations).values({ leadId, reason });
+    return { leadId, tagged: 'needs-human' };
+  },
+});
+```
+
+> **Deep dive:** [agents/authoring.md](agents/authoring.md) — full agent layout, the tool pattern, and the eve doc references.
+
+## Authoring a durable workflow
+
+A workflow is a plain async function in `workflows/<name>.workflow.ts`, marked `'use workflow'`, that declares its contract with **sibling `inputSchema` / `outputSchema` exports** (the build harvests them — there is no `defineWorkflow` wrapper). Side-effects live in helper functions marked `'use step'`.
+
+```ts
+// workflows/onboarding.workflow.ts
+import { z } from '@stackbone/sdk';
+import { stackbone } from '@stackbone/sdk';
+
+// THE contract — sibling exports next to the bare function. The build harvests
+// these into the manifest + a live validator. The input parameter type is
+// DERIVED from inputSchema (z.infer), so there is no second type that can drift.
+export const inputSchema = z.object({
+  userId: z.string(),
+  email: z.email(),
+  plan: z.enum(['free', 'pro', 'scale']),
+});
+
+// Output is DECLARED (not inferred from the TS return type — that loses fields).
+export const outputSchema = z.object({
+  userId: z.string(),
+  subject: z.string(),
+  body: z.string(),
+  tips: z.array(z.string()),
+});
+
+type OnboardingInput = z.infer<typeof inputSchema>;
+
+export async function onboardingWorkflow(input: OnboardingInput) {
+  'use workflow';
+
+  const signup = await validateSignup(input); // step 1 — deterministic
+  const tips = await askSupportForTips(signup.plan); // step 2 — calls the support AGENT
+  const saved = await persistWelcome(signup.userId, tips); // step 3 — side effect (idempotent)
+  return saved;
+}
+
+async function validateSignup(input: OnboardingInput) {
+  'use step';
+  if (!input.email.includes('@')) throw new Error(`Invalid email: ${input.email}`);
+  return { userId: input.userId, plan: input.plan };
+}
+
+async function persistWelcome(userId: string, tips: { tips: string[] }) {
+  'use step'; // deterministic side effect (DB / email). Keep it idempotent on userId.
+  await stackbone.database.insert(welcomes).values({ userId, tips: tips.tips });
+  return { userId, subject: 'Welcome', body: '...', tips: tips.tips };
 }
 ```
 
-Non-streamed completions over ~30 s often hit the platform's invocation timeout. Stream by default for chat.
+Rules that matter for workflows:
 
-### HITL is durable, not blocking
+- **`'use workflow'`** marks the durable orchestrator. The body should be cheap, deterministic glue — it replays on resume. Do the I/O in steps.
+- **`'use step'`** marks a checkpoint that runs **once**, is persisted, and is retried on failure. Make every step **idempotent** — on retry it may run again.
+- **Sibling `inputSchema` / `outputSchema`** are the workflow's public contract. The build extracts them so Studio renders an input form and the emulator validates `start` payloads. Derive the input parameter type with `z.infer<typeof inputSchema>`; declare `outputSchema` explicitly.
+- See `/docs/concepts/workflows` (in the wiki) for the durable-execution model in depth.
+
+> **Deep dive:** [workflows/authoring.md](workflows/authoring.md) — the directive rules, the typed contract, pauses, and every trigger path.
+
+## Triggering and scheduling workflows
+
+From inside a workflow, start another workflow **by name** through the `stackbone.workflows` surface on the ambient client (these bind on dispatch, so they run from a workflow body, not a tool):
 
 ```ts
-const { data: approval, error } = await client.approval.requestAndWait({
-  title: 'Approve contract clause edit',
-  payload: { contractId, clauseDiff },
-  approverRole: 'approver',
+import { stackbone } from '@stackbone/sdk';
+
+const { runId } = await stackbone.workflows.start('reconcile', { invoiceId }); // fire-and-forget → its own run
+const summary = await stackbone.workflows.startAndWait<Summary>('summarize', { docId }); // durably wait for the output
+await stackbone.workflows.schedule('daily-digest', { scope: 'all' }, '0 9 * * *'); // dynamic cron, idempotent by name
+```
+
+- `stackbone.workflows.start(name, input)` enqueues an independent run and returns `{ runId }`; `stackbone.workflows.startAndWait(name, input)` suspends durably until it finishes and returns the validated output. `name` is the `*.workflow.ts` convention name (narrowed to the workspace's declared names once `stackbone dev` has generated `.stackbone/workflows.d.ts`); input is validated against the target's schema before anything is enqueued.
+- `stackbone.workflows.schedule(name, input, cron)` / `.unschedule(name)` / `.listSchedules()` manage **dynamic** cron triggers (one per `name` — re-scheduling replaces it). For schedules that ship with the workspace, prefer the declarative form — `export const schedules = [{ cron, input }]` next to the workflow — which the build harvests and the runtime reconciles on deploy.
+- `ingestDocuments({ collection, content, contentType })` is the durable RAG-ingest trigger (it stages the content, then runs the reserved `rag-ingest` workflow).
+- The shell mirror is `stackbone workflows start <name>` (see the **stackbone-cli** skill).
+
+## The ambient `stackbone` client
+
+`import { stackbone } from '@stackbone/sdk'` — the single handle for every agent surface, reachable from any tool `execute()` or workflow step. It resolves config from the injected environment lazily on first use; there is no `createClient()` and you never pass connection strings.
+
+| Surface                    | What it is                                                                                                  | Envelope                                 |
+| -------------------------- | ----------------------------------------------------------------------------------------------------------- | ---------------------------------------- |
+| `stackbone.database`       | **Native Drizzle ORM** + `postgres-js` over the agent's Neon (vectors with `pgvector`, FTS with `tsvector`) | rows / **throws** (no `{ data, error }`) |
+| `stackbone.storage`        | File uploads / downloads / signed URLs (R2 in prod, MinIO in dev)                                           | `{ data, error }`                        |
+| `stackbone.ai`             | LLM chat / embeddings / vision via OpenRouter (300+ models). Stream long completions.                       | `{ data, error }`                        |
+| `stackbone.rag`            | Ingest + hybrid (`pgvector` + `tsvector`) retrieval; tables are platform-provisioned                        | `{ data, error }`                        |
+| `stackbone.config`         | Read dynamic config the operator edits in Studio: `get(key)` / `getAll()`                                   | `{ data, error }`                        |
+| `stackbone.secrets`        | Read operator-managed encrypted secrets: `get(name)` / `getMany(names)`                                     | `{ data, error }`                        |
+| `stackbone.prompts`        | Versioned prompt catalog: `get()` / `compile(key, vars)` / `list()` / `create()` / …                        | `{ data, error }`                        |
+| `stackbone.approval`       | Agent-local HITL records (used by `requestApproval` under the hood — see below)                             | `{ data, error }`                        |
+| `stackbone.agent(id)`      | Call a sibling agent by name — opens a session, sends a turn (see below)                                    | `result()` → `{ data, status }`          |
+| `stackbone.connection(id)` | Call a third-party connector by id (Stackbone Connect — see below)                                          | `Promise<output>` / **throws** by code   |
+
+The one rule across every surface: **destructure `{ data, error }` and handle both branches.** The sole exception is `stackbone.database` (native Drizzle — it returns rows and throws).
+
+```ts
+const { data, error } = await stackbone.storage
+  .from('avatars')
+  .upload(file, { contentType: 'image/png' });
+if (error) throw new Error(error.message); // propagate the failure
+// success: `data` is typed
+```
+
+`throw` to propagate a failure; branch on `error.code` to handle a known case and `return` instead. **Never swallow the `error` branch.** The error envelope is `{ code, message, meta? }` (`SdkError`).
+
+> `stackbone.database` is native Drizzle: tables are `pgTable` objects from `agents/<name>/schema.ts`; helpers (`eq`, `and`, `sql`, …) come from `@stackbone/sdk/db`. Awaiting a query returns the typed rows and **throws** on error — there is no envelope.
+
+### Calling a sibling agent — `stackbone.agent(id)`
+
+From a workflow step (or another agent's tool), open a session and send a turn. The turn's structured reply is validated against the `outputSchema` you pass.
+
+```ts
+async function askSupportForTips(plan: string) {
+  'use step';
+  const session = stackbone.agent('support').session();
+  const response = await session.send<{ tips: string[] }>({
+    message: `A customer joined the "${plan}" plan. Give up to 3 onboarding tips.`,
+    outputSchema: z.object({ tips: z.array(z.string()) }),
+  });
+  const result = await response.result(); // { data, status }
+  return result.data ?? { tips: [] };
+}
+```
+
+`session().send(...)` returns a response you collect with `result()` (`{ data, status }` where `status` is `'completed' | 'failed' | 'waiting'`) or iterate with `for await...of` for the live stream. `id` is an agent name resolved by the workspace convention scan — the `agents/<name>/` folder basename (its `agent.yaml` `name:`) — optionally overridden by a `stackbone.config.ts`.
+
+> **Deep dive:** [workflow-agents/authoring.md](workflow-agents/authoring.md) — calling an agent from a workflow, with the structured (`result()`) and streaming (`for await`) reply forms.
+
+### Calling a connector — `stackbone.connection(id)`
+
+Call a third-party connector operation directly — no agent, no model in the loop. The credential is brokered by Stackbone Connect; you only pass the operation arguments.
+
+```ts
+async function sendMail(input: { to: string; subject: string; body: string }) {
+  'use step';
+  // Typed from the connector's schema (generated into .stackbone/connect.d.ts on
+  // `stackbone dev`). Equivalent to .call('sendMail', input) at runtime.
+  const output = await stackbone.connection('stub-mail').sendMail(input);
+  return { sent: true, output };
+}
+```
+
+- `stackbone.connection(id).<operation>(args)` is the typed form (once `.stackbone/connect.d.ts` is generated); `stackbone.connection(id).call('<operation>', args)` is the always-available dynamic escape hatch (use it for a dotted operation id like `'chat.postMessage'`).
+- The call returns the operation output and **throws** a `ConnectorCallError` on failure — match `err.code` (the broker taxonomy: `invalid_args`, `credential_error`, `timeout`, …), never `instanceof`.
+- See `/docs/concepts/connect` (in the wiki) for the broker model and how operators register connector credentials. To author a richer eve connection (e.g. an OpenAPI connection with brokered auth) use `connect(connectorId)` from `@stackbone/sdk/connect`.
+
+## Human-in-the-loop — `requestApproval`
+
+A workflow that needs a person to decide pauses **durably** with `requestApproval()` from `@stackbone/sdk/workflow` (NOT the main barrel — the subpath statically imports the `workflow` peer). It writes a row the Studio inbox shows, then races the human decision against a timeout.
+
+```ts
+// workflows/refund.workflow.ts — pause until a human decides.
+// inputSchema / outputSchema are declared as usual (see the workflow example above).
+import { requestApproval } from '@stackbone/sdk/workflow';
+
+export async function refundWorkflow(input: z.infer<typeof inputSchema>) {
+  'use workflow';
+
+  const decision = await requestApproval({
+    token: input.approvalToken, // resume key, unique per approval in a run
+    topic: 'refund',
+    payload: { orderId: input.orderId, amount: input.amount },
+    title: 'Approve refund',
+    timeout: '24h', // ISO duration or ms
+    fallback: 'reject', // applied if the timeout wins the race
+  });
+
+  // Gate the side effect on a fresh approval; decision.timedOut means the fallback fired.
+  if (decision.status !== 'approved') return { refunded: false, decision: decision.status };
+
+  await performRefund(input.orderId, input.amount); // a 'use step' — never runs without a fresh decision
+  return { refunded: true, decision: decision.status };
+}
+```
+
+`requestApproval` returns `{ status: 'approved' | 'rejected', payload?, timedOut }`. **It must be called from the workflow body, never inside a `'use step'`** — pausing on a hook is a workflow primitive that suspends the run. The decision-resume path (`stackbone hitl approve/reject`, the Studio inbox) is in the **stackbone-cli** skill. For advanced cases the subpath also re-exports the raw `defineHook` + `sleep` from `workflow` as an escape hatch.
+
+## Typed config — `config.schema.ts`
+
+Declare your dynamic config once at the workspace root in `config.schema.ts` as a Zod object:
+
+```ts
+// config.schema.ts
+import { z } from 'zod';
+
+export const configSchema = z.object({
+  greeting: z.string().min(1).describe('How the agent opens a conversation'),
+  maxRetries: z.number().int().min(0).max(10).default(3),
+  replyTone: z.enum(['formal', 'casual', 'friendly']).default('friendly'),
+  rateLimit: z.object({ perMinute: z.number().int().min(1).default(60) }),
 });
 ```
 
-The agent **process can die** between `request` and `wait` — the platform persists the approval and resumes the run when the human decides. Do not hold an in-memory promise; the SDK handles continuation.
+`stackbone dev` extracts ONE JSON Schema from it — which draws the Config editor form in Studio and validates writes — **and** generates `.stackbone/config.d.ts`, which augments `@stackbone/sdk`'s `ConfigRegistry`. As a result `stackbone.config.get('greeting')` is **key-checked and typed**: a typo is a compile error, `greeting` is `string`, `replyTone` is the enum union, and `rateLimit` is a navigable nested object.
 
-### QStash for any work > 30 s
+## Injected environment (read by the runtime)
 
-```ts
-await client.queues.publish('process-contract', { contractId });
+The runtime injects these at boot; **never hardcode them, never ask the user for them, never declare them in `agent.yaml`.** They are platform-managed.
 
-// Receiver in the same agent — Stackbone routes the callback with signed HMAC
-export const receivers = {
-  'process-contract': async ({ contractId }, ctx) => {
-    /* ... */
-  },
-};
-```
+| Category    | Variables                                                                       |
+| ----------- | ------------------------------------------------------------------------------- |
+| Identity    | `AGENT_ID`, `WORKSPACE_ID`, `STACKBONE_INSTALLATION_ID`                         |
+| Persistence | `DATABASE_URL`, `STACKBONE_SECRET_KEY`                                          |
+| Security    | `HMAC_SECRET` (signs the runtime's session/workflow/connector calls)            |
+| Workflows   | `WORKFLOW_REDIS_URL` (durable step state), `AGENT_URLS` (sibling-agent routing) |
+| LLM         | `OPENROUTER_API_KEY`, `OPENROUTER_BASE_URL` (managed sub-key, passthrough cost) |
 
-Use `client.queues` for fan-out, retries with exponential backoff, dead-letter inspection. The platform survives scale-to-zero — Neon hibernates, QStash wakes the container with the signed callback.
+> Observability needs **no env var from you**: the runtime auto-instruments outbound calls and correlates `console.*` output with the right run. There is no observability surface to configure.
 
-### RAG: ingest async, retrieve sync
+## agent.yaml — the per-agent manifest
 
-```ts
-// Ingest is queued automatically when you call .upload(); never block invoke on it
-await client.rag.from('contracts').upload(file);
+`stackbone.config.ts` is an **optional workspace-level override** — by default the workspace is discovered by convention from the files on disk, and the config only wins when present. Each agent carries its own per-agent `agent.yaml` (model engine, database paths, RAG embedding model, required connectors, seeded automations); this is the manifest the convention scan reads, and its `name:` must equal the folder basename. The schema is `.strict()` — an unknown key fails parse. See [agent-yaml.md](agent-yaml.md) for the full reference.
 
-// Retrieval is fast (Postgres hybrid: pgvector + tsvector)
-const { data, error } = await client.rag.from('contracts').retrieve(query, { limit: 5 });
-```
+## Authoring guides
 
-### `client.events` is for cross-agent fan-out within an org
+The full authoring reference for each workspace piece:
 
-```ts
-await client.events.emit({ type: 'contract.approved', payload: { contractId } });
-```
+| Piece                                                | Doc                                                          |
+| ---------------------------------------------------- | ------------------------------------------------------------ |
+| An eve agent (model, instructions, tools)            | [agents/authoring.md](agents/authoring.md)                   |
+| A durable workflow (`'use workflow'` / `'use step'`) | [workflows/authoring.md](workflows/authoring.md)             |
+| A workflow that calls an agent (streaming or direct) | [workflow-agents/authoring.md](workflow-agents/authoring.md) |
 
-Other agents in the same organization that **subscribed** to `contract.approved` in their own `agent.yaml` get invoked. **Don't use it as a generic webhook** — out-of-org delivery is not in scope.
+## Per-surface deep dives
 
-## Tier and quota awareness
+The full method shapes and worked examples for each ambient surface live in the leaf docs — read the one your task touches:
 
-Each organization has a tier (`free` / `starter` / `pro` / `team`) with a credit bundle that covers license + infra + LLM tokens. When credits run out the agent **pauses** until the next period or until upgrade. The SDK does not need to check tier explicitly — failed calls return `error.code === 'tier_quota_exceeded'` with a `nextActions` block telling the org member to upgrade. Surface that error verbatim, do not retry.
+| Task                                                      | Doc                                                              |
+| --------------------------------------------------------- | ---------------------------------------------------------------- |
+| Drizzle queries, transactions, vectors, full-text, paging | [database/sdk-integration.md](database/sdk-integration.md)       |
+| Uploads, the `key` handle, public/signed URLs             | [storage/sdk-integration.md](storage/sdk-integration.md)         |
+| Chat/embeddings, **streaming** long completions, vision   | [ai/sdk-integration.md](ai/sdk-integration.md)                   |
+| Ingest and hybrid retrieval                               | [rag/sdk-integration.md](rag/sdk-integration.md)                 |
+| Durable HITL pauses (`requestApproval`)                   | [hitl/sdk-integration.md](hitl/sdk-integration.md)               |
+| Versioned prompt catalog + `compile()`                    | [prompts/sdk-integration.md](prompts/sdk-integration.md)         |
+| Connector operations (typed + `.call`)                    | [connections/sdk-integration.md](connections/sdk-integration.md) |
+| Triggering & scheduling workflows, background work        | [scheduling/sdk-integration.md](scheduling/sdk-integration.md)   |
 
 ## Branch the backend for risky changes
 
-If a code change depends on a schema migration, a new RLS policy, an event subscription change in `agent.yaml`, or anything else that could leave a deployed agent broken — work on a `stackbone dev` session first (your local installation, isolated DB / R2 / QStash) instead of testing against the cloud `agent`. See the **stackbone-cli** skill (`dev` reference) for the loop.
-
-## SDK quick reference
-
-| Module                 | Methods (most used)                                                                                                      |
-| ---------------------- | ------------------------------------------------------------------------------------------------------------------------ |
-| `client.database`      | `.from(table).select() / .insert([rows]) / .update({...}).where(...) / .delete().where(...) / .rpc(name, args)`          |
-| `client.storage`       | `.from(bucket).upload(file, opts) / .download(key) / .signedUrl(key, expiresIn) / .remove(keys[]) / .list(prefix)`       |
-| `client.ai`            | `.chat.completions.create({model, messages, stream?}) / .embeddings.create({input, model}) / .images.generate({prompt})` |
-| `client.rag`           | `.from(collection).upload(file) / .retrieve(query, {limit, filter}) / .delete(docId)`                                    |
-| `client.queues`        | `.publish(topic, payload, {delay?, schedule?}) / .schedule(name, cron, handler)`                                         |
-| `client.approval`      | `.requestAndWait({title, payload, approverRole}) / .request({...}) / .resume(approvalId, decision)`                      |
-| `client.secrets`       | `.get(key)` (system secrets are env vars, not here)                                                                      |
-| `client.config`        | `.get<T>(path?)` (read-only AGENT_CONFIG jsonb)                                                                          |
-| `client.connections`   | `.from(provider).getToken() / .from(provider).client()` (provider-typed client, refreshed token baked in)                |
-| `client.events`        | `.emit({type, payload}) / .on(type, handler)`                                                                            |
-| `client.observability` | `.span(name, fn) / .log(level, msg, attrs)`                                                                              |
+If a change depends on a schema migration, a new RLS policy, a `rag.embeddingModel` change, or anything else that could leave a deployed agent broken — work on a `stackbone dev` session first (your local install, isolated Postgres + Redis + MinIO) before touching the cloud. See the **stackbone-cli** skill (`dev` reference) for the loop.
 
 ## Important notes
 
-- **No HTTP framework choice**. The wrapper is Hono + Node 24 LTS. You can opt in to Bun via `runtime.engine: bun` in `agent.yaml`; the SDK and contract are runtime-agnostic.
-- **No Dockerfile** is needed. The platform buildpack builds the container from `package.json` + `agent.yaml` + `src/`. If you really need one (custom system deps), declare `runtime.dockerfile: ./Dockerfile` and own the contract yourself.
-- **Embed-capable agents** must declare it (`capabilities: [chat-embed]`) and accept `{ session_id, message }` in `invoke`. Embed traffic counts toward Trust Layer metrics; playground traffic doesn't.
-- **Trigger types** on `ctx.run.trigger`: `'manual' | 'webhook' | 'cron' | 'event' | 'embed'`. Branch on this if behavior differs (e.g. don't run expensive RAG ingest on `embed`).
-- **No `console.log` in hot paths** — use `client.observability.log()`; it flows through OTel with the right attributes (`organization_id`, `agent_id`, `invocation_id`) and is queryable from Studio.
-- **The agent owns its data**. Stackbone never reads or writes the agent's Neon directly. If the platform needs something (e.g. for billing), it's tracked out-of-band against partner APIs, not by querying the agent's DB.
+- **No HTTP framework choice, no Dockerfile.** The runtime serves the agent (`/eve/v1/*`) and the workflows (`/api/workflows/*`); you write neither HTTP routes nor a Dockerfile. The platform buildpack builds the container from your workspace.
+- **Keep `@stackbone/sdk` (and eve) external in `build.externalDependencies`.** Inlining the SDK gives the agent a second copy of the invocation-context store and per-run logs lose their run id. `stackbone publish` enforces this.
+- **Steps must be idempotent.** A `'use step'` is retried on failure and replayed on resume — code it so running twice is safe.
+- **The agent owns its data.** Stackbone never reads or writes the agent's Neon directly.
+- **`requestApproval` lives on `@stackbone/sdk/workflow`**, not the main barrel — importing it from `@stackbone/sdk` will not resolve.

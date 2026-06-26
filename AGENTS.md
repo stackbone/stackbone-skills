@@ -12,6 +12,7 @@ stackbone-skills/
 ├── CONTRIBUTING.md              # contribution flow
 ├── LICENSE                      # MIT
 └── skills/
+    ├── stackbone-coder/         # generate a piece by interview (orchestrator)
     ├── stackbone/               # SDK / build the agent
     ├── stackbone-cli/           # CLI / publish and operate
     └── stackbone-debug/         # diagnostics
@@ -41,11 +42,12 @@ The `description:` is the **trigger** — Claude reads it to decide when to load
 
 ## How the skills compose
 
-| Skill             | Audience inside the agent's day                               | Delegates to                                        |
-| ----------------- | ------------------------------------------------------------- | --------------------------------------------------- |
-| `stackbone`       | Writing code in `src/index.ts` of an agent template (SDK use) | `stackbone-cli` for build / publish / db migrations |
-| `stackbone-cli`   | Operating the CLI to scaffold, develop and publish            | `stackbone` for SDK code inside the agent           |
-| `stackbone-debug` | Triage when something fails                                   | `stackbone-cli` for the actual commands             |
+| Skill             | Audience inside the agent's day                         | Delegates to                                           |
+| ----------------- | ------------------------------------------------------- | ------------------------------------------------------ |
+| `stackbone-coder` | Starting a new piece — interviews, then scaffolds it    | `stackbone` for the code, `stackbone-cli` for commands |
+| `stackbone`       | Writing eve agents + workflows in a workspace (SDK use) | `stackbone-cli` for build / publish / db migrations    |
+| `stackbone-cli`   | Operating the CLI to scaffold, develop and publish      | `stackbone` for SDK code inside the agent              |
+| `stackbone-debug` | Triage when something fails                             | `stackbone-cli` for the actual commands                |
 
 If you find yourself repeating content across two skills, prefer cross-linking (`see the stackbone skill for X`) over duplicating — drift is the enemy.
 
@@ -53,9 +55,9 @@ If you find yourself repeating content across two skills, prefer cross-linking (
 
 Inside `skills/stackbone/<module>/`:
 
-| File                 | Purpose                                                           |
-| -------------------- | ----------------------------------------------------------------- |
-| `sdk-integration.md` | How to use `@stackbone/sdk` inside the agent (Hono + Node 24 LTS) |
+| File                 | Purpose                                                                    |
+| -------------------- | -------------------------------------------------------------------------- |
+| `sdk-integration.md` | How to use one `@stackbone/sdk` surface via the ambient `stackbone` client |
 
 Inside `skills/stackbone-cli/references/`:
 
@@ -86,10 +88,10 @@ Inside `skills/stackbone-cli/references/`:
 
 ## Key Stackbone patterns to remember when writing skills
 
-1. **Glossary discipline** — `agent_template` is the marketplace recipe (a row in `stackbone_platform.agent_template`); `agent` is the provisioned instance with its own Neon + R2 + queues. **A `starter` is source code on disk** (the local scaffold a creator clones with `stackbone init`). Do not blur these.
+1. **Glossary discipline** — `agent_template` is the marketplace recipe (a row in `stackbone_platform.agent_template`); `agent` is the provisioned instance with its own Neon + R2 + durable execution. **A `workspace` is source code on disk** (what a creator scaffolds with `stackbone init` — eve agents + workflows). Do not blur these.
 2. **`{ data, error }` envelope** — every SDK method returns `{ data, error }`. Examples must show both branches.
-3. **Env vars are injected** — the creator never hardcodes `DATABASE_URL`, `AWS_ACCESS_KEY_ID`, `OPENROUTER_API_KEY`, `QSTASH_TOKEN`, etc. The platform injects them at runtime. Saying "set this env var" is wrong — the right framing is "this env var will be available at runtime".
-4. **No HTTP code in the agent** — the canonical contract (`/invoke`, `/health`, `/schema`) is mounted by `stackbone serve`. The creator only writes `defineAgent({ invoke })`.
-5. **Postgres-only persistence inside the agent** — relational, vectors, full-text, KV cache and the `_queue_jobs` table all live in the agent's dedicated Neon. There is no Redis, no separate vector DB, no separate KV store.
+3. **Env vars are injected** — the creator never hardcodes `DATABASE_URL`, `AWS_ACCESS_KEY_ID`, `OPENROUTER_API_KEY`, etc. The platform injects them at runtime. Saying "set this env var" is wrong — the right framing is "this env var will be available at runtime".
+4. **No HTTP code, no Dockerfile** — the runtime serves each eve agent (`/eve/v1/*`) and the workflows (`/api/workflows/*`); the creator only writes agents (`agent.ts` + tools) and workflows (`'use workflow'` / `'use step'`).
+5. **Persistence** — relational data, vectors, full-text and KV cache live in the agent's dedicated Neon (`stackbone.database`); durable workflow/step state lives in managed Redis. No separate vector DB or KV store.
 6. **CLI is agent-friendly** — `--json`, `--yes`, semantic exit codes, contracted output envelopes. Skills should assume the agent passes `--json --yes` by default.
 7. **Tenancy** — organizations have members with roles `owner` / `admin` / `member` / `approver`. The CLI operates against the active organization (resolved from the device-flow session); cross-org commands take `--agent <id>`.

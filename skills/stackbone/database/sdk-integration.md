@@ -1,24 +1,17 @@
-# `client.database` — SDK integration
+# `stackbone.database` — SDK integration
 
-Drizzle ORM (driver `postgres-js`) over the agent's dedicated Neon Postgres. Exposes the relational store, vector store (`pgvector`), full-text store (`tsvector`), KV cache (table with `expires_at`) and the durable queue table (`_queue_jobs`) — all in the same database.
+Drizzle ORM (driver `postgres-js`) over the agent's dedicated Neon Postgres. Exposes the relational store, vector store (`pgvector`), full-text store (`tsvector`) and KV cache (a table with `expires_at`) — all in the same database.
 
-## Connection
+`stackbone.database` is **native Drizzle, verbatim**: awaiting a query returns the typed rows (an array) and **throws** on error. There is no `{ data, error }` envelope (that's every _other_ surface — `stackbone.storage`, `stackbone.ai`, `stackbone.rag`, `stackbone.approval`, `stackbone.secrets`, `stackbone.config`, `stackbone.prompts`). Handle errors with `try/catch`, or let the throw bubble up.
 
-```ts
-import { createClient } from '@stackbone/sdk';
-
-const client = createClient(); // reads STACKBONE_POSTGRES_URL injected at boot
-```
-
-No connection string is passed. The platform injects `STACKBONE_POSTGRES_URL` and the SDK manages the pool, retries on Neon scale-to-zero wake-up (~1–3 s on cold), and HTTP-mode connection serialization for serverless wrappers.
+`import { stackbone } from '@stackbone/sdk'`. Reach `stackbone.database` from any tool's `execute()` or any workflow step — no `createClient()`, no connection string; the platform injects `DATABASE_URL` and the SDK builds + pools the connection lazily on first use (retrying Neon scale-to-zero wake-ups).
 
 ## Schema declaration
 
-Declare your schema in `src/db/schema.ts` using Drizzle's typed builders:
+Declare your schema in `src/schema.ts` with Drizzle's typed builders, then **import the table objects** wherever you query. The verbs (`select().from(table)`, `insert(table)`, `update(table)`, `delete(table)`) take the `pgTable` **object** — never a string name.
 
 ```ts
-import { pgTable, uuid, text, timestamp, jsonb } from 'drizzle-orm/pg-core';
-import { vector } from 'drizzle-orm/pg-core'; // pgvector
+import { pgTable, uuid, text, timestamp, jsonb, vector } from '@stackbone/sdk/db';
 
 export const contracts = pgTable('contracts', {
   id: uuid('id').defaultRandom().primaryKey(),
@@ -30,64 +23,66 @@ export const contracts = pgTable('contracts', {
 });
 ```
 
-The schema file is **read by `stackbone db migrate create`** to diff against the previous applied migration. Edits here trigger a new migration on the next `migrate create`.
+`@stackbone/sdk/db` re-exports `drizzle-orm` and `drizzle-orm/pg-core` wholesale, so **every** column builder (`pgTable`, `text`, `uuid`, `vector`, …) and **every** query helper (`eq`, `and`, `or`, `sql`, `desc`, `asc`, `isNull`, …) come from that one path — never import `drizzle-orm` directly.
+
+```ts
+import { eq, and, desc, sql } from '@stackbone/sdk/db';
+```
+
+`stackbone db migrate create` reads this file to diff against the last applied migration, so edits here trigger a new migration on the next run.
 
 ## CRUD
 
-All methods return `{ data, error }`. Always destructure both branches.
-
-### Select
+Await the Drizzle builder directly — no `.first()` / `.all()` / `.page()`. A `select()` resolves to an **array** of typed rows; take the first with destructuring, check existence with `.length` or `if (!row)`.
 
 ```ts
-const { data, error } = await client.database
-  .from(contracts)
+import { eq, desc } from '@stackbone/sdk/db';
+
+const rows = await stackbone.database.select().from(contracts).where(eq(contracts.id, contractId));
+const [contract] = rows;
+if (!contract) throw new Error(`Contract ${contractId} not found`);
+
+// Pagination: Drizzle's own .limit() / .offset() / .orderBy() — there is no cursor helper.
+const page = await stackbone.database
   .select()
-  .where(eq(contracts.id, contractId))
-  .first();
-
-if (error) return ctx.fail('db_read_failed', error.message);
-if (!data) return ctx.fail('not_found', `Contract ${contractId}`);
-return ctx.ok({ contract: data });
+  .from(contracts)
+  .orderBy(desc(contracts.createdAt))
+  .limit(50)
+  .offset(0);
 ```
 
-- `.first()` returns the first row or `null`.
-- `.all()` returns the full array (use pagination for unbounded queries).
-- `.page({ limit: 50, cursor })` returns `{ rows, nextCursor }` — cursor-based, opaque to the agent.
+Wrap the await in `try/catch` only when you want to react to a DB error instead of letting it bubble.
 
-### Insert (always an array)
+`insert(table).values(...)` takes one object **or** an array; `.returning()` gives back the inserted rows:
 
 ```ts
-const { data, error } = await client.database
-  .from(contracts)
-  .insert([{ title: 'NDA', body: '...' }])
+const [created] = await stackbone.database
+  .insert(contracts)
+  .values({ title: 'NDA', body: '...' })
   .returning();
 
-// `data` is `[{ id, title, body, ... }]` — note the array even for single inserts.
+await stackbone.database.insert(contracts).values([{ title: 'A' }, { title: 'B' }]); // batch
 ```
 
-**Inserting a bare object is rejected**: `insert({ ... })` throws — the array shape is mandatory. This forces explicit batching semantics for fan-out and prevents accidental single-row inserts inside loops.
-
-### Update
+`update` and `delete` follow the same shape — always pass an explicit `.where(...)`, add `.returning()` to get rows back:
 
 ```ts
-const { data, error } = await client.database
-  .from(contracts)
-  .update({ status: 'signed', signedAt: new Date() })
+import { eq, isNull } from '@stackbone/sdk/db';
+
+const [updated] = await stackbone.database
+  .update(contracts)
+  .set({ status: 'signed', signedAt: new Date() })
   .where(eq(contracts.id, contractId))
   .returning();
+
+await stackbone.database.delete(contracts).where(eq(contracts.id, contractId));
 ```
 
-### Delete
-
-```ts
-await client.database.from(contracts).delete().where(eq(contracts.id, contractId));
-```
-
-For soft-delete patterns, add a `deleted_at` column and filter with `isNull(contracts.deletedAt)` — there is no built-in soft-delete helper.
+For soft-delete, add a `deleted_at` column and filter with `isNull(contracts.deletedAt)` — there's no built-in helper.
 
 ## Vectors (`pgvector`)
 
-Declare the column with `vector('embedding', { dimensions: <N> })` where `<N>` matches your embedding model:
+Declare the column with `vector('embedding', { dimensions: <N> })` where `<N>` matches your model:
 
 | Model                           | Dimensions |
 | ------------------------------- | ---------- |
@@ -95,21 +90,16 @@ Declare the column with `vector('embedding', { dimensions: <N> })` where `<N>` m
 | `openai/text-embedding-3-large` | 3072       |
 | `cohere/embed-english-v3.0`     | 1024       |
 
-Then index with the **distance operator you'll use at query time**:
+Index in a migration with the **distance operator you'll query with** (`<->` cosine, `<#>` inner product, `<=>` L2), then query through `execute(sql\`...\`)`, which returns the result rows (and throws on error like every `stackbone.database` call):
 
 ```sql
--- In a migration, paired with the table:
-CREATE INDEX contracts_embedding_idx
-  ON contracts
-  USING hnsw (embedding vector_cosine_ops);
+CREATE INDEX contracts_embedding_idx ON contracts USING hnsw (embedding vector_cosine_ops);
 ```
 
-Query with the matching operator (`<->` cosine, `<#>` inner product, `<=>` L2):
-
 ```ts
-import { sql } from 'drizzle-orm';
+import { sql } from '@stackbone/sdk/db';
 
-const { data, error } = await client.database.execute(sql`
+const matches = await stackbone.database.execute(sql`
   SELECT id, title, embedding <-> ${queryEmbedding}::vector AS distance
   FROM contracts
   WHERE embedding IS NOT NULL
@@ -118,28 +108,37 @@ const { data, error } = await client.database.execute(sql`
 `);
 ```
 
-> **An index built with one operator does sequential scans (and wrong results) for queries using a different operator.** Pick the operator on day one and stay consistent. For RAG, prefer `client.rag` — it manages the schema + index + operator alignment for you.
+> **An index built with one operator does sequential scans (and wrong results) for a query using a different one.** Pick the operator on day one and stay consistent. For RAG, prefer `stackbone.rag` — it aligns schema, index and operator for you.
 
 ## Full-text search (`tsvector`)
 
+Drizzle's pg-core has no `tsvector` builder, so declare a `text` placeholder and let a migration trigger own the real column:
+
 ```ts
-import { tsvector } from '@stackbone/sdk/drizzle'; // re-exported helper
+import { pgTable, uuid, text } from '@stackbone/sdk/db';
 
 export const contracts = pgTable('contracts', {
-  // ...
-  searchTsv: tsvector('search_tsv'),
+  id: uuid('id').defaultRandom().primaryKey(),
+  title: text('title').notNull(),
+  body: text('body'),
+  searchTsv: text('search_tsv'), // maintained by a trigger; Drizzle just needs to know it exists
 });
-
-// In the migration, add a trigger:
-// CREATE TRIGGER contracts_tsv_update BEFORE INSERT OR UPDATE
-//   ON contracts FOR EACH ROW EXECUTE FUNCTION
-//   tsvector_update_trigger(search_tsv, 'pg_catalog.english', title, body);
 ```
 
-Query with the `@@` operator:
+```sql
+ALTER TABLE contracts ALTER COLUMN search_tsv TYPE tsvector USING search_tsv::tsvector;
+
+CREATE TRIGGER contracts_tsv_update BEFORE INSERT OR UPDATE
+  ON contracts FOR EACH ROW EXECUTE FUNCTION
+  tsvector_update_trigger(search_tsv, 'pg_catalog.english', title, body);
+```
+
+Query with the `@@` operator through raw SQL:
 
 ```ts
-const { data, error } = await client.database.execute(sql`
+import { sql } from '@stackbone/sdk/db';
+
+const results = await stackbone.database.execute(sql`
   SELECT id, title, ts_rank(search_tsv, plainto_tsquery('english', ${q})) AS rank
   FROM contracts
   WHERE search_tsv @@ plainto_tsquery('english', ${q})
@@ -148,81 +147,101 @@ const { data, error } = await client.database.execute(sql`
 `);
 ```
 
-## Hybrid search (vector + full-text)
-
-The standard pattern: take the union of vector kNN and tsvector top-K, then re-rank. Built into `client.rag` already — only hand-roll if you need a custom collection schema.
+For **hybrid** search (union of vector kNN + tsvector top-K, re-ranked) reach for `stackbone.rag` — only hand-roll if you need a custom collection schema.
 
 ## KV cache (`expires_at` table)
 
-For ad-hoc caching outside the SDK's RAG / queue tables, declare your own:
+For ad-hoc caching, declare your own table and read/write it with the normal verbs plus `onConflictDoUpdate` — no need for Redis, since the agent's Neon already exposes `pg_cron`:
 
 ```ts
-export const cache = pgTable('app_cache', {
+import { eq, gt, and } from '@stackbone/sdk/db';
+
+const cache = pgTable('app_cache', {
   key: text('key').primaryKey(),
   value: jsonb('value').notNull(),
   expiresAt: timestamp('expires_at').notNull(),
 });
+
+const [hit] = await stackbone.database
+  .select()
+  .from(cache)
+  .where(and(eq(cache.key, key), gt(cache.expiresAt, new Date())));
+
+await stackbone.database
+  .insert(cache)
+  .values({ key, value, expiresAt })
+  .onConflictDoUpdate({ target: cache.key, set: { value, expiresAt } });
 ```
 
-And add a `pg_cron` job in a migration to evict stale rows:
+Add a `pg_cron` job in a migration to evict stale rows:
 
 ```sql
-SELECT cron.schedule(
-  'cache-evict',
-  '*/5 * * * *',
-  $$ DELETE FROM app_cache WHERE expires_at < now() $$
-);
+SELECT cron.schedule('cache-evict', '*/5 * * * *', $$ DELETE FROM app_cache WHERE expires_at < now() $$);
 ```
 
-This is the recommended pattern instead of pulling in Redis — the agent's Neon already exposes `pg_cron`.
+## Calling Postgres functions
 
-## RPC (Postgres functions / triggers)
+There is no `.rpc(...)`. Call a stored function (defined in a migration) with raw SQL through `execute`:
 
 ```ts
-const { data, error } = await client.database.rpc('compute_invoice_total', {
-  contract_id: contractId,
-});
-```
+import { sql } from '@stackbone/sdk/db';
 
-Functions live in a migration:
-
-```sql
-CREATE OR REPLACE FUNCTION compute_invoice_total(contract_id uuid)
-  RETURNS numeric
-  LANGUAGE sql
-  STABLE
-AS $$
-  SELECT coalesce(sum(amount), 0) FROM invoice_lines WHERE contract_id = $1
-$$;
+const [{ total }] = await stackbone.database.execute(sql`
+  SELECT compute_invoice_total(${contractId}) AS total
+`);
 ```
 
 ## Transactions
 
+Use a transaction when two or more writes must succeed or fail together. The callback gets `tx`, with the same verbs as `stackbone.database`; throwing inside rolls the whole thing back:
+
 ```ts
-await client.database.transaction(async (tx) => {
-  await tx.insert(contracts).values([{ title }]);
-  await tx.insert(contractEvents).values([{ contractId, type: 'created' }]);
+await stackbone.database.transaction(async (tx) => {
+  const [contract] = await tx.insert(contracts).values({ title }).returning();
+  await tx.insert(contractEvents).values({ contractId: contract.id, type: 'created' });
 });
 ```
 
-Rolls back on any thrown error. The SDK's auto-retry (Neon hibernation) wraps the whole closure — don't add your own retry inside.
+The SDK's auto-retry (Neon wake-up / pool rebuild) wraps the whole closure — don't add your own retry inside.
+
+## Escape hatches
+
+`stackbone.database.query` is Drizzle's relational query builder (`findFirst` / `findMany` over declared relations):
+
+```ts
+import { eq } from '@stackbone/sdk/db';
+
+const contract = await stackbone.database.query.contracts.findFirst({
+  where: eq(contracts.id, contractId),
+});
+```
+
+`stackbone.database.raw()` and `.shared()` return the **raw Drizzle handle** (the same single pooled instance). Use `raw()` when a library needs a `PostgresJsDatabase` directly; `shared()` is the cross-surface accessor. Reach for them only when the structured verbs don't fit.
 
 ## Best practices
 
-1. **Always destructure `{ data, error }`.** Throw or return on error; never proceed with `data` when `error` is set.
-2. **Inserts are arrays.** Single inserts use `.insert([{...}])` — the array shape is enforced.
-3. **Vector and full-text indexes are picky about operators.** If you build one, document the operator inline.
-4. **Use `pg_cron` for cleanups.** It's already enabled. No need for an external scheduler for db hygiene.
-5. **Don't query Stackbone tables (`_storage_objects`, `_rag_*`, `_queue_jobs`, `_migrations`) by hand.** Use the `client.storage` / `client.rag` / `client.queues` modules. Those tables are internal contracts that can change.
-6. **Migrations are the source of truth for schema.** Don't apply ad-hoc DDL via `stackbone db query --writable` — it works but leaves drift.
+1. **`stackbone.database` throws — it does not return `{ data, error }`.** Let it bubble, or wrap in `try/catch`. The envelope is for every _other_ `stackbone.*` surface.
+2. **Tables are objects, not strings.** Import your `pgTable` from `src/schema.ts` and pass the object to `select().from(table)`, etc.
+3. **Helpers come from `@stackbone/sdk/db`.** `eq`, `and`, `sql`, `desc`, every column builder — one import path.
+4. **A `select()` is an array.** Use `const [row] = await ...`; check `rows.length` / `if (!row)`. No `.first()` / `.all()` / `.page()`.
+5. **Vector and full-text indexes are picky about operators.** If you build one, document the operator inline.
+6. **Use `pg_cron` for cleanups.** It's already enabled — no external scheduler for db hygiene.
+7. **Don't query internal Stackbone tables (`_storage_objects`, `_rag_*`, `_migrations`) by hand.** Use the `stackbone.storage` / `stackbone.rag` surfaces — those tables are internal contracts that can change.
+8. **Migrations are the source of truth for schema.** Put every schema change through `stackbone db migrate create` — the read-only `stackbone db query` explorer can't alter schema, and changing it any other way leaves drift.
 
 ## Common mistakes
 
-| Mistake                                                | Fix                                                                                                                                |
-| ------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------- |
-| `insert({ title })` (object)                           | `insert([{ title }])` (array)                                                                                                      |
-| Index built `vector_l2_ops`, query uses `<->` (cosine) | Pick one and use it everywhere. Rebuild the index or rewrite the query.                                                            |
-| Filter on `tsvector` column without `@@`               | Use `@@` with `plainto_tsquery` / `to_tsquery`                                                                                     |
-| `client.database.delete()` without `.where(...)`       | The SDK refuses unfiltered `delete()` / `update()` calls — pass an explicit `.where(eq(true, true))` if you really mean "all rows" |
-| Reading `_queue_jobs` / `_rag_chunks` directly         | Use `client.queues` / `client.rag` — schema is internal                                                                            |
-| Forgetting to `await` on a chain                       | All chain terminators (`.first()`, `.all()`, `.page()`, `.returning()`) are async; missing `await` returns the unresolved builder  |
+| Mistake                                                | Fix                                                                                                   |
+| ------------------------------------------------------ | ----------------------------------------------------------------------------------------------------- |
+| `const { data, error } = await stackbone.database...`  | It returns rows / throws — `const rows = await ...`, then `try/catch` if you need to handle the error |
+| `.from(table).select()` / `.select().where().first()`  | `await stackbone.database.select().from(table).where(...)` → array; first row is `const [row] = rows` |
+| `.all()` / `.page({ limit, cursor })`                  | `.limit(n).offset(m)` with `.orderBy(...)` — there is no cursor helper                                |
+| `stackbone.database.rpc('fn', { ... })`                | `await stackbone.database.execute(sql\`SELECT fn(${arg})\`)`                                          |
+| Passing a string table name (`.from('contracts')`)     | Pass the imported `pgTable` object (`.from(contracts)`)                                               |
+| Index built `vector_l2_ops`, query uses `<->` (cosine) | Pick one and use it everywhere. Rebuild the index or rewrite the query.                               |
+| Filter on `tsvector` column without `@@`               | Use `@@` with `plainto_tsquery` / `to_tsquery` in a raw `execute(sql\`...\`)`                         |
+| `stackbone.database.delete()` without `.where(...)`    | Always pass an explicit `.where(...)`; an unfiltered delete/update wipes the whole table              |
+| Reading `_rag_chunks` / internal tables directly       | Use `stackbone.rag` / `stackbone.storage` — the schema is internal                                    |
+| Forgetting to `await` the builder                      | The Drizzle builder is a thenable; without `await` you hold the unresolved builder, not the rows      |
+
+See the main [SKILL.md](../SKILL.md) for how `stackbone.database` sits alongside the other ambient surfaces.

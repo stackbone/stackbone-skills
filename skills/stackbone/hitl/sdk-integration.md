@@ -1,219 +1,101 @@
-# `client.approval` — SDK integration
+# Human-in-the-loop (`requestApproval`) — SDK integration
 
-Human-in-the-loop pauses. This module is a **Stackbone-native facade** — it does not wrap any upstream SDK. The control plane persists the approval, surfaces it in the HITL inbox (Studio + email), and resumes the run when a human decides.
+> Folder note: this lives under `hitl/` because the **feature** is human-in-the-loop. The authoring primitive is `requestApproval()` from `@stackbone/sdk/workflow`; the lower-level inbox surface it writes to is `stackbone.approval`.
 
-The key property: **pauses are durable**. The agent process can die, the container can hibernate, the org's tier can switch — the pending approval survives. When the human decides, the platform re-invokes the agent with the decision payload in `ctx.run.trigger === 'approval_resumed'`.
+A workflow that needs a person to decide **pauses durably** with `requestApproval()` from `@stackbone/sdk/workflow` (NOT the main barrel — the subpath statically imports the `workflow` peer). It writes a row the Studio HITL inbox shows, then races the human decision against a timeout. The pause is durable: the process can die and the run resumes from the same gate when the decision (or the timeout) arrives — the hook state lives in Redis, keyed by your `token`.
 
-## Connection
+**It must be called from the workflow body, never inside a `'use step'`** — pausing on a hook is a workflow primitive that suspends the run. Do all I/O in steps; keep the gate in the body.
 
-```ts
-import { createClient } from '@stackbone/sdk';
-
-const client = createClient();
-```
-
-No env vars are needed. The platform routes approval traffic through `PLATFORM_API_URL` + `PLATFORM_API_KEY`, both injected at boot. You never touch them.
-
-## Request and wait
-
-The simplest shape — open an approval and block the current `invoke` until the human decides. Used when the invocation's deadline is generous (chat embeds, manual triggers) or when the work is small enough that holding the run is cheap.
+## The gate
 
 ```ts
-const { data, error } = await client.approval.requestAndWait({
-  title: 'Approve contract clause edit',
-  description: 'Counterparty wants to remove the auto-renewal clause.',
-  payload: { contractId, clauseDiff, requestedBy: 'alice@acme.com' },
-  approverRole: 'approver',
-});
+// workflows/refund.workflow.ts
+import { z } from '@stackbone/sdk';
+import { requestApproval } from '@stackbone/sdk/workflow';
 
-if (error) return ctx.fail(error.code, error.message);
+export const inputSchema = z.object({ orderId: z.string(), amount: z.number().positive() });
+export const outputSchema = z.object({ refunded: z.boolean(), decision: z.string() });
 
-if (data.decision === 'approved') {
-  await applyEdit(data.editedPayload ?? data.payload);
-  return ctx.ok({ status: 'applied' });
-}
+export async function refundWorkflow(input: z.infer<typeof inputSchema>) {
+  'use workflow';
 
-if (data.decision === 'rejected') {
-  return ctx.ok({ status: 'rejected', reason: data.reason });
-}
-```
-
-`requestAndWait` returns when the approver decides. **The process holding the promise may not be the same process that resumes** — that is the durability contract. The SDK handles the continuation transparently:
-
-1. `requestAndWait` registers the approval with the control plane and includes the current run's continuation token.
-2. The platform persists `{ runId, continuationToken, approvalId }` in the HITL inbox.
-3. If the container hibernates / crashes / scales down, the in-memory promise is lost — that is expected.
-4. When the human decides, the platform re-invokes `/invoke` with `trigger === 'approval_resumed'` and the original input. The SDK detects the continuation token and the second call's `requestAndWait` resolves with the decision instead of opening a new approval.
-
-You write the same code for both cases. The SDK abstracts the continuation.
-
-### Options
-
-| Option           | Required            | Notes                                                                                                           |
-| ---------------- | ------------------- | --------------------------------------------------------------------------------------------------------------- |
-| `title`          | yes                 | Shown in the inbox card. Keep ≤80 chars.                                                                        |
-| `description`    | no                  | Markdown allowed. Goes under the title.                                                                         |
-| `payload`        | yes                 | Any JSON-serialisable value. Shown to the approver verbatim; can be edited if `editable: true`.                 |
-| `approverRole`   | yes                 | An RBAC role declared in the org (e.g. `'approver'`, `'finance-lead'`). Members with that role see the request. |
-| `editable`       | no, default `false` | If true, the approver can edit `payload` before approving; the edited copy is in `data.editedPayload`.          |
-| `expiresIn`      | no, default `7d`    | Auto-rejects after the deadline. String (`'48h'`) or `Date`.                                                    |
-| `idempotencyKey` | no                  | Re-issuing `requestAndWait` with the same key resolves to the existing approval rather than opening a new one.  |
-
-## Request (no wait)
-
-Open the approval, return immediately, and continue the run. Useful when the agent has other work to do and should not block on the human.
-
-```ts
-const { data, error } = await client.approval.request({
-  title: 'Verify identity document',
-  payload: { userId, idDocKey },
-  approverRole: 'kyc-reviewer',
-});
-
-if (error) return ctx.fail(error.code, error.message);
-
-return ctx.ok({ approvalId: data.approvalId, status: 'pending' });
-```
-
-The platform calls `/invoke` again with `trigger === 'approval_resumed'` and the approval payload in `input.approval` when the decision lands. Handle that branch in your `invoke`:
-
-```ts
-async invoke(input, ctx) {
-  if (ctx.run.trigger === 'approval_resumed') {
-    const { approvalId, decision, payload, editedPayload } = input.approval;
-    if (decision === 'approved') {
-      await onApproved(editedPayload ?? payload);
-    } else {
-      await onRejected(payload, input.approval.reason);
-    }
-    return ctx.ok({});
-  }
-
-  // normal path…
-}
-```
-
-## Resume programmatically
-
-Useful for tests, for admin overrides, or for bot approvers (e.g. an auto-approver below a threshold).
-
-```ts
-const { data, error } = await client.approval.resume(approvalId, {
-  decision: 'approved',
-  reason: 'auto-approved: amount below threshold',
-  editedPayload: { ...originalPayload, autoApproved: true },
-});
-
-if (error) return ctx.fail(error.code, error.message);
-```
-
-The platform treats programmatic `resume` exactly like a human decision — the original run resumes, the inbox card closes, the decision is auditable with `decidedBy: 'agent:<agentId>'`.
-
-## Get
-
-```ts
-const { data, error } = await client.approval.get(approvalId);
-
-if (error) return ctx.fail(error.code, error.message);
-
-// data === { approvalId, status, payload, decision?, decidedBy?, decidedAt?, createdAt, expiresAt }
-```
-
-Useful when surfacing approval state to the UI from a non-resumed invocation.
-
-## Cancel
-
-```ts
-const { data, error } = await client.approval.cancel(approvalId, 'user cancelled the request');
-
-if (error) return ctx.fail(error.code, error.message);
-```
-
-Pulls the card from the inbox without inviting a decision. The original run is resumed with `decision === 'cancelled'`.
-
-## Patterns
-
-### Approve-or-die guard inside a longer flow
-
-```ts
-const { data, error } = await client.approval.requestAndWait({
-  title: 'Send invoice for €10,000',
-  payload: { invoiceId, amount: 10_000 },
-  approverRole: 'finance-lead',
-  expiresIn: '24h',
-});
-
-if (error) return ctx.fail(error.code, error.message);
-if (data.decision !== 'approved') return ctx.ok({ status: 'skipped', reason: data.reason });
-
-await sendInvoice(invoiceId);
-return ctx.ok({ status: 'sent' });
-```
-
-The agent process can die between request and decision — the run resumes on the same code path 24 hours later if needed.
-
-### Threshold-based auto-approval
-
-```ts
-async function approveOrAutoApprove(payload: { amount: number }, ctx) {
-  if (payload.amount < 100) {
-    // Cheap stuff doesn't need a human
-    return { decision: 'approved' as const, payload };
-  }
-
-  const { data, error } = await client.approval.requestAndWait({
-    title: `Charge €${payload.amount}`,
-    payload,
-    approverRole: 'finance-lead',
+  const decision = await requestApproval({
+    token: `refund-${input.orderId}`, // resume key — unique per approval in the run
+    topic: 'refund',
+    payload: { orderId: input.orderId, amount: input.amount },
+    title: 'Approve refund',
+    timeout: '24h', // ISO duration or ms
+    fallback: 'reject', // applied if the timeout wins the race
   });
 
-  if (error) throw new Error(error.message);
-  return { decision: data.decision, payload: data.editedPayload ?? data.payload };
+  // status === 'approved' is the ONLY green light; gate the side-effect on it.
+  if (decision.status !== 'approved') {
+    return { refunded: false, decision: decision.status };
+  }
+  await performRefund(input.orderId, input.amount); // a non-idempotent step, gated
+  return { refunded: true, decision: decision.status };
 }
 ```
 
-### Idempotent approval (don't double-open)
+## Options
 
-```ts
-const { data, error } = await client.approval.requestAndWait({
-  title: 'Refund order',
-  payload: { orderId },
-  approverRole: 'support-lead',
-  idempotencyKey: `refund:${orderId}`, // second call returns the existing approval
-});
+| Option     | Required | Notes                                                                                              |
+| ---------- | -------- | -------------------------------------------------------------------------------------------------- |
+| `token`    | yes      | The resume key — **unique per approval within a run**. The host resumes the parked run by it.      |
+| `topic`    | yes      | Approval category, mirrored to the inbox row (`'refund'`, `'contract.clause-edit'`).               |
+| `payload`  | yes      | The data the human reviews in the inbox card. Keep it small and readable.                          |
+| `title`    | no       | Human-readable title shown in the inbox / run inspection.                                          |
+| `timeout`  | no       | ISO-8601 duration (`'24h'`, `'90m'`) or milliseconds. Omit for no deadline.                        |
+| `fallback` | no       | `'approve'` \| `'reject'` — the decision applied if the timeout wins the race. Default `'reject'`. |
+
+## The decision
+
+`requestApproval` resolves to `{ status, payload?, timedOut }`:
+
+- `status` is `'approved'` or `'rejected'`. **Only `'approved'` should unlock the side-effect.**
+- `payload` is whatever the human attached when deciding (optional).
+- `timedOut` is `true` only when the `fallback` was applied because nobody decided in time. A run that "resumed on its own and rejected" is the fallback firing — check the `timeout` / `fallback`.
+
+## Resolving the decision
+
+A human decides in the Studio HITL inbox, or from the shell:
+
+```sh
+stackbone hitl list --json                  # the pending inbox
+stackbone hitl approve <hitlId> --yes        # ✱ resumes the parked run
+stackbone hitl reject <hitlId> --reason "…" --yes
 ```
 
-Without `idempotencyKey`, a retried `invoke` opens a duplicate card. With it, the second call rides the original approval.
+The host resumes the parked run by `token` (`POST /api/workflows/hooks/:token/resume`). See the **stackbone-cli** skill (`hitl` reference).
+
+## Reading inbox state — `stackbone.approval`
+
+`requestApproval` writes the inbox row through the ambient `stackbone.approval` surface; you **rarely call it directly**. When you need to read approval state from a tool or step, `stackbone.approval.get(approvalId)` / `stackbone.approval.list({ status, topic })` return the `{ data, error }` envelope. For a fully custom gate, the raw `defineHook` + `sleep` are also re-exported from `@stackbone/sdk/workflow`.
 
 ## Best practices
 
-1. **Always destructure `{ data, error }`.**
-2. **Prefer `requestAndWait` for clarity.** The SDK handles continuation; you don't manage the two-call dance.
-3. **Always set `approverRole`.** Without it, the request lands in a generic queue that no one watches.
-4. **Use `idempotencyKey` whenever a retry could double-open.** Cheap insurance.
-5. **Keep payloads small and human-readable.** The approver scans them in a card — JSON blobs of 200 lines are useless.
-6. **Set an `expiresIn`.** Approvals that linger forever clog the inbox; 24 h–7 d is the right range for most flows.
-7. **Surface decision context.** When you ask, include the `requestedBy` / `requestedAt` / business rationale in `payload` so the approver does not need to dig.
+1. **Gate on `status === 'approved'`.** Treat rejected and timed-out the same way — no side-effect.
+2. **Keep the gated step idempotent.** A resume replays the workflow body up to the gate; the side-effect must be safe to reach again.
+3. **Use a stable, unique `token`** (e.g. `refund-${orderId}`) — it is the resume key and groups nothing else.
+4. **Always set a `timeout` + `fallback`.** An approval with no deadline can park a run forever.
+5. **Small, human-readable `payload`.** The approver scans a card — put rationale in `title`/`payload`, not a 200-line blob.
 
 ## Common mistakes
 
-| Mistake                                                                       | Fix                                                                                                         |
-| ----------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
-| Holding an in-memory queue of pending approvals                               | The platform persists them. Re-fetch with `client.approval.get(approvalId)` or wait for `approval_resumed`. |
-| Polling `requestAndWait` in a loop                                            | `requestAndWait` is durable — call it once. The SDK handles continuation.                                   |
-| Forgetting to handle `decision === 'rejected'`                                | The approver can reject. Always branch on `decision`.                                                       |
-| Hard-coding `approverRole: 'admin'` everywhere                                | Different decisions need different reviewers (finance, KYC, legal). Pick the right role per request.        |
-| Putting raw HTML / Markdown in `payload` and expecting it to render           | The card renders `payload` as JSON. Use `description` for rich text.                                        |
-| Re-issuing the same approval on every `invoke` retry without `idempotencyKey` | Add an idempotency key — otherwise the inbox fills with duplicates.                                         |
+| Mistake                                            | Fix                                                                        |
+| -------------------------------------------------- | -------------------------------------------------------------------------- |
+| Calling `requestApproval` inside a `'use step'`    | It's a workflow primitive — call it from the `'use workflow'` body.        |
+| Running the side-effect before checking `status`   | Gate it: `if (decision.status !== 'approved') return …` before the effect. |
+| Reusing one `token` for several approvals in a run | Each approval needs its own unique `token` (it's the resume key).          |
+| Expecting `timedOut` to mean "rejected by a human" | `timedOut: true` is the `fallback` firing, not a human decision.           |
 
 ## Common error codes
 
-| `error.code`               | Cause                                                                                | Action                                                                     |
-| -------------------------- | ------------------------------------------------------------------------------------ | -------------------------------------------------------------------------- |
-| `approval_already_decided` | `resume()` / `cancel()` on an approval that is already approved / rejected / expired | Inspect via `get()`; do not retry.                                         |
-| `approval_not_found`       | `get()` / `resume()` / `cancel()` on an unknown ID                                   | The approval may have been deleted by retention policy. Treat as terminal. |
-| `approval_expired`         | `requestAndWait` / `resume` after `expiresAt`                                        | Re-issue a new request if still relevant.                                  |
-| `approval_role_unknown`    | `approverRole` does not exist in the org's RBAC                                      | Coordinate with the org member to declare the role in Studio.              |
-| `capability_not_granted`   | `agent.yaml` missing `capabilities: [hitl]`                                          | Declare it — see [agent-yaml.md](../agent-yaml.md).                        |
+| `error.code`               | Cause                                                      | Action                                                                      |
+| -------------------------- | ---------------------------------------------------------- | --------------------------------------------------------------------------- |
+| `approval_persist_failed`  | The inbox row write failed (run never showed in the inbox) | A missing/unmigrated `approvals` table or DB error — inspect `error.cause`. |
+| `approval_not_found`       | `stackbone.approval.get()` on an unknown id                | The id never persisted; treat as terminal.                                  |
+| `approval_invalid_request` | Missing `topic` / `payload` on the request                 | Supply the required field.                                                  |
+| `approval_unavailable`     | A read against the agent database failed                   | Retry; if it persists, the database handle is unavailable.                  |
 
-See the main [SKILL.md](../SKILL.md) for the cross-module patterns. The HITL inbox itself is part of the platform, not the agent — orgs see all approvals across all installed agents in one place.
+See the main [SKILL.md](../SKILL.md) for how `requestApproval` fits the durable-workflow model, and [scheduling/sdk-integration.md](../scheduling/sdk-integration.md) for the other workflow helpers.
