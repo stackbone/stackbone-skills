@@ -1,87 +1,56 @@
 # Workflow → agent (the hybrid)
 
-A **workflow-agent** is the composed pattern: a durable [workflow](../workflows/authoring.md) owns the fixed, auditable backbone and delegates an open-ended turn to a durable [eve agent](../agents/authoring.md). The workflow validates and records; the agent thinks (its own session memory + tools). Scaffold the pair with `stackbone add workflow-agent <name>`, or wire a step into an existing workflow with `stackbone add workflow <name> --calls <agent>`.
+A **workflow-agent** is the composed pattern: a durable [workflow](../workflows/authoring.md) owns the fixed, auditable backbone and delegates an open-ended turn to a [deep agent](../agents/authoring.md). The workflow validates and records; the agent thinks (its model + tools). Scaffold the pair with `stackbone add workflow-agent <name>`, or wire a step into an existing workflow with `stackbone add workflow <name> --calls <agent>`.
 
-From a `'use step'`, reach a sibling agent through the ambient `stackbone` client:
-
-```ts
-const session = stackbone.agent('lead-qualifier').session();
-const response = await session.send<{ reply: string }>({
-  message,
-  outputSchema: z.object({ reply: z.string() }),
-});
-```
-
-- `stackbone.agent(id)` selects an agent by name (the `agents/<id>/` folder basename).
-- `.session(state?)` opens a session; pass a prior `state` (or continuation token) to **resume a multi-turn conversation**.
-- `.send<TOutput>(input)` sends a turn. `input` is a bare string (shorthand for `{ message }`) or `{ message, outputSchema, … }`; the `outputSchema` (Zod) validates the structured reply and types `TOutput`.
-
-The returned `response` is consumed **one of two ways** — it is a single-use stream, so pick one.
-
-## Direct — collect the structured result
-
-The durable-step default. Await `.result()`, get `{ data, status }`, gate on `status`, and return the data as the step's checkpoint.
+From a `'use step'`, call a sibling agent **in-process** with `callDeepAgent` from `@stackbone/sdk/workflow`:
 
 ```ts
-import { z, stackbone } from '@stackbone/sdk';
+import { callDeepAgent } from '@stackbone/sdk/workflow';
 
 async function askAgent(message: string) {
   'use step';
-  const session = stackbone.agent('lead-qualifier').session();
-  const response = await session.send<{ reply: string }>({
-    message,
-    outputSchema: z.object({ reply: z.string() }),
-  });
-
-  const result = await response.result(); // { data, status }
-  if (result.status !== 'completed') throw new Error(`agent turn ${result.status}`);
-  return result.data?.reply ?? '';
+  const { text } = await callDeepAgent('lead-qualifier', message);
+  return text;
 }
 ```
 
-`status` is `'completed' | 'failed' | 'waiting'`; `data` is typed by the `outputSchema`. This is the shape `stackbone add workflow-agent` scaffolds.
+- `callDeepAgent(name, input)` selects an agent by name (the `deep-agents/<name>/` folder basename). Once `stackbone dev` has generated `.stackbone/agents.d.ts`, the name is **typed** — a typo is a compile error.
+- The call runs the agent's LangGraph graph **in the same process** — no HTTP, no signing, no session plumbing.
+- The result is `{ text }` — the agent's final reply as a string. If you need structure, ask the agent for JSON in the message and parse/validate it in the step.
 
-## Streaming — forward the agent's tokens to the caller
+## Input forms
 
-For a **chat-style workflow** (served over `POST /api/workflows/:name/chat` as SSE), iterate the response and forward each frame to the run's streamed output with `getWritable()` from the `workflow` package.
+`input` is a bare string (shorthand for one user message) or a full message list to carry context:
 
 ```ts
-import { stackbone } from '@stackbone/sdk';
-import { getWritable } from 'workflow';
-
-async function streamAgent(message: string) {
-  'use step';
-  const session = stackbone.agent('lead-qualifier').session();
-  const response = await session.send({ message });
-
-  // Forward each eve frame to the run's readable side; /chat serves it as SSE.
-  const writer = getWritable().getWriter();
-  try {
-    for await (const event of response) {
-      await writer.write(event); // event: { type, data } — text deltas, tool calls, …
-    }
-  } finally {
-    writer.releaseLock(); // the runtime owns the stream's close (when the run ends)
-  }
-}
+const { text } = await callDeepAgent('lead-qualifier', {
+  messages: [
+    { role: 'system', content: 'Answer with a single JSON object.' },
+    { role: 'user', content: `Qualify this lead: ${JSON.stringify(lead)}` },
+  ],
+});
 ```
 
-- Each `event` is an eve stream frame `{ type, data }` (text deltas, tool calls, …).
-- A workflow only counts as **streaming** if it both imports `getWritable` from `'workflow'` **and** calls it — that build-time signal is what routes the workflow to the streaming chat panel instead of the one-shot run panel.
-- Use `.result()` **or** `for await` on a given response, never both — they drain the same stream.
+Roles are `system` | `user` | `assistant`. For a multi-turn exchange inside one workflow, accumulate the messages yourself and pass the growing list on each call — the workflow owns the conversation state (checkpointed step by step), not the agent.
 
-## Multi-turn: persist and resume the session
+## The turn is ONE durable step
 
-Read `session.state` after a turn and pass it back to `.session(state)` next time so a returning user continues the same conversation:
+The whole agent turn — model calls, tool calls, everything — executes inside the single `'use step'` that awaits it. That means:
+
+- The step's **checkpoint** is the returned `{ text }`; on resume the turn is not re-run.
+- On **retry** (the step failed), the whole turn re-runs from zero — the agent's side-effectful tools must be **idempotent**, exactly like any other step side-effect.
+- Keep post-processing (parsing, DB writes) in **separate steps** so a parse failure doesn't re-run the model call.
 
 ```ts
-const session = stackbone.agent('support').session(priorState); // priorState?: state | continuation token
-await (await session.send({ message })).result();
-const nextState = session.state; // persist this; resume from it on the next turn
+export async function qualifyLeadWorkflow(input: z.infer<typeof inputSchema>) {
+  'use workflow';
+  const reply = await askAgent(`Qualify: ${input.email}`); // step 1 — the agent turn
+  const saved = await persistVerdict(input.leadId, reply); // step 2 — side effect, idempotent
+  return saved;
+}
 ```
 
 ## References
 
-- [Sessions, runs & streaming](https://eve.dev/docs/concepts/sessions-runs-and-streaming) — eve's turn + stream model.
-- [Workflow SDK — streaming](https://workflow-sdk.dev/docs/ai) — the `getWritable()` "step that streams" pattern.
-- [agents/authoring.md](../agents/authoring.md) · [workflows/authoring.md](../workflows/authoring.md)
+- [agents/authoring.md](../agents/authoring.md) — authoring the agent itself.
+- [workflows/authoring.md](../workflows/authoring.md) — the directive rules, schemas, and streaming chat workflows (`getWritable()`).

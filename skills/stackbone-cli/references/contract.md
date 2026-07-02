@@ -4,19 +4,19 @@ Inspect the Stackbone Agent Protocol contract the targeted installation advertis
 
 ## Subcommands
 
-| Command                           | Description                                                                                                                                                          |
-| --------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `stackbone contract show`         | Full contract: version, minSupported, build, runtimeUrl, capabilities.                                                                                               |
-| `stackbone contract schema`       | The agent's declared input/output JSON Schema, if any (or "none declared"). Workspace agents declare schemas per workflow — use `stackbone workflows schema <name>`. |
-| `stackbone contract capabilities` | The capabilities the install reports (e.g. `queues.jobs`, `storage.s3`). **Derived** from the contract handshake — no separate endpoint.                             |
-| `stackbone contract validate`     | Validate the local `agent.yaml` against the advertised contract (or the local emulator contract when no project is linked). Useful before a publish.                 |
+| Command                           | Description                                                                                                                                          |
+| --------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `stackbone contract show`         | Full contract: version, minSupported, build, runtimeUrl, capabilities.                                                                               |
+| `stackbone contract capabilities` | The capabilities the install reports (e.g. `queues.jobs`, `storage.s3`). **Derived** from the contract handshake — no separate endpoint.             |
+| `stackbone contract validate`     | Validate the local `agent.yaml` against the advertised contract (or the local emulator contract when no project is linked). Useful before a publish. |
 
 ```sh
 stackbone contract show --json
-stackbone contract schema --json
 stackbone contract capabilities --json
 stackbone contract validate --json   # { ok, violations, deviations, contractVersion, source }
 ```
+
+> Per-agent input/output schemas are **per workflow** now — inspect them with `stackbone workflows schema <name>` (see [references/workflows.md](workflows.md)), not a single agent-level `/invoke` schema.
 
 `validate` is CLI-native (no HTTP endpoint of its own): it reads `agent.yaml`, fetches the target's contract (or builds the local emulator contract when there is no install to target), then checks that (a) the contract version is still supported and (b) every capability the manifest declares is advertised. Today's starters rarely declare `capabilities`, so a missing array is recorded in `deviations` rather than failing — only real version/capability mismatches are `violations`. `validate` exits **1** when there are violations.
 

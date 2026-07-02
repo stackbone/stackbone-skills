@@ -2,7 +2,7 @@
 name: stackbone-coder
 description: >-
   Use this skill to GENERATE a new Stackbone piece from a clean idea through a guided interview:
-  first decide what to build — an eve agent, a durable workflow, or a workflow-agent (a workflow
+  first decide what to build — a deep agent, a durable workflow, or a workflow-agent (a workflow
   that calls an agent) — then scaffold it with the stackbone CLI and interview the user surface by
   surface. For an agent you ask for its tools and its system prompt; for a workflow you ask for the
   input data and the output data (the inputSchema / outputSchema); then you walk the capability
@@ -18,9 +18,9 @@ description: >-
 license: MIT
 metadata:
   author: stackbone
-  version: '0.1.0'
+  version: '1.1.0'
   organization: Stackbone
-  date: June 2026
+  date: July 2026
 ---
 
 # Stackbone coder — generate a piece by interview
@@ -44,23 +44,23 @@ This skill turns _"I want to build X"_ into a scaffolded, wired-up Stackbone pie
 
 Ask **one** question first — what are we building?
 
-| Type               | What it is                                                                                               | Pick it when                                                                        |
-| ------------------ | -------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------- |
-| **agent**          | A durable [eve](https://eve.dev) agent: model + instructions + tools, holds a conversation across turns. | A human (or another agent) **talks to it** and it reasons/acts with tools.          |
-| **workflow**       | Durable, replayable code: `input → steps → output`, no conversation.                                     | A background job, ETL, a scheduled task, multi-step orchestration with checkpoints. |
-| **workflow-agent** | A durable workflow that **calls an eve agent** in one of its steps.                                      | You need both: deterministic orchestration **and** a reasoning agent in the loop.   |
+| Type               | What it is                                                                                                               | Pick it when                                                                        |
+| ------------------ | ------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------- |
+| **agent**          | A [deepagents](https://github.com/langchain-ai/deepagentsjs) agent: model + system prompt + tools, holds a conversation. | A human (or another agent) **talks to it** and it reasons/acts with tools.          |
+| **workflow**       | Durable, replayable code: `input → steps → output`, no conversation.                                                     | A background job, ETL, a scheduled task, multi-step orchestration with checkpoints. |
+| **workflow-agent** | A durable workflow that **calls a deep agent** in one of its steps (`callDeepAgent`).                                    | You need both: deterministic orchestration **and** a reasoning agent in the loop.   |
 
-Then detect the workspace: if the cwd already has `package.json` + `agents/` + `workflows/`, you'll **`add`** to it; otherwise you'll **`init`** a new one.
+Then detect the workspace: if the cwd already has `package.json` + `deep-agents/` (or `workflows/`), you'll **`add`** to it; otherwise you'll **`init`** a new one.
 
 ### 2. Scaffold with the CLI
 
 Drive `stackbone` (see the **stackbone-cli** skill for the full surface):
 
 - **New workspace:** `stackbone init <name> --with <agent|workflow|workflow-agent>`
-- **Existing workspace:** `stackbone add <agent|workflow|workflow-agent> <name>`
+- **Existing workspace:** `stackbone add <deep-agent|workflow|workflow-agent> <name>`
 - `workflow-agent` and `add workflow --calls <agent>` wire the workflow→agent step for you.
 
-> **Network:** `agent` and `workflow-agent` register the agent eagerly in the control plane, so the user must be signed in (`stackbone login`) — an unauthenticated `add agent` fails with `Unauthorized → Run stackbone login`. A plain `workflow` is fully offline.
+> **Network:** every `add` kind is fully **offline** (the pieces are members of the already-linked workspace). Only `init` needs a signed-in session (`stackbone login`) — it links the workspace to the org.
 
 ### 3. Type-specific interview
 
@@ -74,7 +74,7 @@ Open the matching reference and run its interview:
 
 ### 4. Capability checklist — one at a time
 
-Open [references/capabilities.md](references/capabilities.md) and walk **every** capability with the user, one question each: _do we need a database? storage? an LLM call? RAG? human-in-the-loop? a connector? prompts? config? secrets? a schedule? to call another agent?_ For each **yes**, the reference tells you the surface, where it's reachable from (tool vs. workflow step), what to add (a `schema.ts`, an `agent.yaml` line, a `config.schema.ts`…), and which `stackbone`-skill deep-dive to follow for the code.
+Open [references/capabilities.md](references/capabilities.md) and walk **every** capability with the user, one question each: _do we need a database? storage? an LLM call? RAG? human-in-the-loop? a connector? prompts? config? secrets? a schedule? to call another agent?_ For each **yes**, the reference tells you the surface, where it's reachable from (tool vs. workflow step), what to add (a `schema.ts`, a line in an optional `agent.yaml`, a `config.schema.ts`…), and which `stackbone`-skill deep-dive to follow for the code.
 
 ### 5. Wire & verify
 
@@ -86,5 +86,5 @@ Write the code with the **stackbone** skill, then boot the emulator with `stackb
 | ------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------- |
 | [references/agent.md](references/agent.md)                   | The agent interview: role, system prompt, the tools (name / description / inputs / behaviour), model choice.                             |
 | [references/workflow.md](references/workflow.md)             | The workflow interview: trigger, input data, output data, the steps; how answers map to `inputSchema` / `outputSchema` and `'use step'`. |
-| [references/workflow-agent.md](references/workflow-agent.md) | The combined interview + the workflow step that calls the agent via `stackbone.agent(id)`.                                               |
+| [references/workflow-agent.md](references/workflow-agent.md) | The combined interview + the workflow step that calls the agent via `callDeepAgent`.                                                     |
 | [references/capabilities.md](references/capabilities.md)     | The full capability checklist — every surface, when it applies, what it adds, and the deep-dive pointer.                                 |

@@ -32,21 +32,13 @@ Device flow lets a CLI on a headless machine, a CI runner, or a dev container au
 # Interactive, opens browser
 stackbone login
 
-# CI runner that pre-injects a long-lived access token
-export STACKBONE_ACCESS_TOKEN=...
-# stackbone login is unnecessary — every command uses the env var directly
+# No browser on this machine: print the URL + code to enter from any device
+stackbone login --no-browser
 ```
 
-## CI / agent shell — bypass login entirely
+## CI / agent shell
 
-The login flow needs human approval. For non-interactive contexts, **issue a personal access token from Studio's Settings page** and pass it as `STACKBONE_ACCESS_TOKEN`:
-
-```sh
-export STACKBONE_ACCESS_TOKEN="stk_pat_..."
-stackbone whoami --json   # verifies the token works
-```
-
-`STACKBONE_ACCESS_TOKEN` always wins over `~/.stackbone/credentials.json`. PATs are revocable per-token from Studio.
+There is **no token env var and no PAT** — authentication comes only from `~/.stackbone/credentials.json`, minted by `stackbone login`. For non-interactive contexts, run `stackbone login` once on a machine with a browser and carry that file into the runner (it holds a refresh token, so it keeps working without re-login). Verify with `stackbone whoami --json`.
 
 ## What's stored
 
@@ -78,6 +70,5 @@ stackbone whoami --json   # verifies the token works
 
 ## Common mistakes
 
-- **Running `stackbone login` in a script.** The script blocks waiting for browser approval. Use `STACKBONE_ACCESS_TOKEN` instead.
+- **Running `stackbone login` in a script.** The script blocks waiting for browser approval. Pre-seed `~/.stackbone/credentials.json` from an interactive login instead — there is no token env var.
 - **Committing `~/.stackbone/credentials.json`.** It's chmod 600 and outside the project, but worth noting — never copy it into the project tree.
-- **Reusing one PAT across multiple machines.** Issue one PAT per machine / CI provider — they're cheap and revoking one doesn't lock you out of the others.

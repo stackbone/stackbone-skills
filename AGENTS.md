@@ -42,12 +42,12 @@ The `description:` is the **trigger** — Claude reads it to decide when to load
 
 ## How the skills compose
 
-| Skill             | Audience inside the agent's day                         | Delegates to                                           |
-| ----------------- | ------------------------------------------------------- | ------------------------------------------------------ |
-| `stackbone-coder` | Starting a new piece — interviews, then scaffolds it    | `stackbone` for the code, `stackbone-cli` for commands |
-| `stackbone`       | Writing eve agents + workflows in a workspace (SDK use) | `stackbone-cli` for build / publish / db migrations    |
-| `stackbone-cli`   | Operating the CLI to scaffold, develop and publish      | `stackbone` for SDK code inside the agent              |
-| `stackbone-debug` | Triage when something fails                             | `stackbone-cli` for the actual commands                |
+| Skill             | Audience inside the agent's day                          | Delegates to                                           |
+| ----------------- | -------------------------------------------------------- | ------------------------------------------------------ |
+| `stackbone-coder` | Starting a new piece — interviews, then scaffolds it     | `stackbone` for the code, `stackbone-cli` for commands |
+| `stackbone`       | Writing deep agents + workflows in a workspace (SDK use) | `stackbone-cli` for build / publish / db migrations    |
+| `stackbone-cli`   | Operating the CLI to scaffold, develop and publish       | `stackbone` for SDK code inside the agent              |
+| `stackbone-debug` | Triage when something fails                              | `stackbone-cli` for the actual commands                |
 
 If you find yourself repeating content across two skills, prefer cross-linking (`see the stackbone skill for X`) over duplicating — drift is the enemy.
 
@@ -88,10 +88,10 @@ Inside `skills/stackbone-cli/references/`:
 
 ## Key Stackbone patterns to remember when writing skills
 
-1. **Glossary discipline** — `agent_template` is the marketplace recipe (a row in `stackbone_platform.agent_template`); `agent` is the provisioned instance with its own Neon + R2 + durable execution. **A `workspace` is source code on disk** (what a creator scaffolds with `stackbone init` — eve agents + workflows). Do not blur these.
+1. **Glossary discipline** — `agent_template` is the marketplace recipe (a row in `stackbone_platform.agent_template`); `agent` is the provisioned instance with its own Neon + R2 + durable execution. **A `workspace` is source code on disk** (what a creator scaffolds with `stackbone init` — deep agents + workflows). Do not blur these.
 2. **`{ data, error }` envelope** — every SDK method returns `{ data, error }`. Examples must show both branches.
 3. **Env vars are injected** — the creator never hardcodes `DATABASE_URL`, `AWS_ACCESS_KEY_ID`, `OPENROUTER_API_KEY`, etc. The platform injects them at runtime. Saying "set this env var" is wrong — the right framing is "this env var will be available at runtime".
-4. **No HTTP code, no Dockerfile** — the runtime serves each eve agent (`/eve/v1/*`) and the workflows (`/api/workflows/*`); the creator only writes agents (`agent.ts` + tools) and workflows (`'use workflow'` / `'use step'`).
+4. **No HTTP code, no Dockerfile** — the runtime serves each deep agent over the standard OpenAI/Anthropic chat endpoints (selected by the `model` field) and the workflows over `/api/workflows/*`; the creator only writes agents (`deep-agents/<name>/index.ts` — `defineDeepAgent` with LangChain tools) and workflows (`'use workflow'` / `'use step'`).
 5. **Persistence** — relational data, vectors, full-text and KV cache live in the agent's dedicated Neon (`stackbone.database`); durable workflow/step state lives in managed Redis. No separate vector DB or KV store.
 6. **CLI is agent-friendly** — `--json`, `--yes`, semantic exit codes, contracted output envelopes. Skills should assume the agent passes `--json --yes` by default.
 7. **Tenancy** — organizations have members with roles `owner` / `admin` / `member` / `approver`. The CLI operates against the active organization (resolved from the device-flow session); cross-org commands take `--agent <id>`.

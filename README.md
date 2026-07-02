@@ -8,7 +8,7 @@ Agent Skills for coding agents (Claude Code, Cursor, Windsurf, Cline, Codex, ...
 
 ## What is Stackbone?
 
-Creators author a **workspace** of durable [eve](https://eve.dev) agents and [Workflow SDK](https://workflow-sdk.dev) workflows on `@stackbone/sdk`; organizations install them and get an **agent** that runs in their own cloud with its own database (with vector search), object storage, durable execution (Redis), a human-in-the-loop inbox and an LLM gateway (OpenRouter) baked in. The creator never writes auth, billing, metrics, HTTP routes or integration clients — every step of the lifecycle (scaffold, develop, publish, operate) runs through the `stackbone` CLI.
+Creators author a **workspace** of **deep agents** ([deepagents](https://github.com/langchain-ai/deepagentsjs)/LangGraph, served over the standard OpenAI/Anthropic chat endpoints) and [Workflow SDK](https://workflow-sdk.dev) workflows on `@stackbone/sdk`; organizations install them and get an **agent** that runs in their own cloud with its own database (with vector search), object storage, durable execution (Redis), a human-in-the-loop inbox and an LLM gateway (OpenRouter) baked in. The creator never writes auth, billing, metrics, HTTP routes or integration clients — every step of the lifecycle (scaffold, develop, publish, operate) runs through the `stackbone` CLI.
 
 ## Installation
 
@@ -17,8 +17,6 @@ Creators author a **workspace** of durable [eve](https://eve.dev) agents and [Wo
 ```bash
 npx skills add stackbone/stackbone-skills
 ```
-
-Add `-a claude-code` / `-a cursor` / `-a windsurf` / etc. to target specific agents. With no `-a` flag the registry installs into every supported agent it detects.
 
 ### Claude Code marketplace
 
@@ -50,17 +48,17 @@ Turn _"I want to build X"_ into a scaffolded, wired-up Stackbone piece through a
 <details>
 <summary><strong>stackbone</strong> — SDK / build the agent</summary>
 
-Write the inside of a workspace — eve agents and durable workflows — using `@stackbone/sdk` and the ambient `stackbone` client. Covers:
+Write the inside of a workspace — deep agents and durable workflows — using `@stackbone/sdk` and the ambient `stackbone` client. Covers:
 
-- **Agents & workflows** — author a durable eve agent (`agent.ts` + `instructions.md` + tools) and durable workflows (`'use workflow'` / `'use step'` with sibling `inputSchema` / `outputSchema`); reach every surface through the ambient `stackbone` client from a tool's `execute()` or a workflow step.
+- **Agents & workflows** — author a deep agent (one `deep-agents/<name>/index.ts` default-exporting `defineDeepAgent` with model + inline system prompt + LangChain tools) and durable workflows (`'use workflow'` / `'use step'` with sibling `inputSchema` / `outputSchema`); call an agent from a step with `callDeepAgent`; reach every surface through the ambient `stackbone` client from a tool or a workflow step.
 - **Database** — Drizzle ORM over Neon Postgres, `pgvector`, `tsvector`, transactions (`stackbone.database` — native Drizzle, throws).
 - **Storage** — Cloudflare R2 via `@aws-sdk/client-s3` (MinIO in dev), logical buckets (`stackbone.storage`).
 - **AI** — OpenRouter through the official `openai` SDK shape, passthrough billing (`stackbone.ai`).
 - **RAG** — parser + chunker + embeddings + `pgvector` retrieval; schema platform-provisioned (`stackbone.rag`).
 - **Triggering & scheduling** — start workflows by name and register cron schedules (`stackbone.workflows.start` / `stackbone.workflows.schedule`).
-- **HITL** — durable pauses with `requestApproval()` from `@stackbone/sdk/workflow`; decide in Studio or the CLI.
-- **Secrets / config / prompts / connections** — agent-local primitives (`stackbone.secrets`, `stackbone.config`, the versioned `stackbone.prompts` catalog, `stackbone.connection(id)` for third-party connectors).
-- **agent.yaml manifest** — the per-agent recipe (apiVersion, name, runtime, database, dev, rag.embeddingModel, connections, automations, protocol — a `.strict()` schema). No Dockerfile, no HTTP routes — the runtime serves the agent + workflows.
+- **HITL** — two levels: tool-level pauses with `interruptOn` on `defineDeepAgent`, and workflow pauses with `requestApproval()` from `@stackbone/sdk/workflow`; decide in Studio or the CLI.
+- **Secrets / config / prompts / connections** — agent-local primitives (`stackbone.secrets`, `stackbone.config`, the versioned `stackbone.prompts` catalog, `stackbone.connection(id)` for third-party connectors, `connectorTool` to hand an operation to the model).
+- **No manifests, no plumbing** — no Dockerfile, no HTTP routes; the runtime serves every agent over the standard OpenAI/Anthropic chat endpoints and the workflows over `/api/workflows/*`.
 
 **Use this skill when**: writing agent/workflow logic, wiring a `stackbone` surface, declaring `agent.yaml`. For CLI tasks (scaffold, publish, db migrations), use `stackbone-cli` instead.
 
@@ -72,10 +70,10 @@ Write the inside of a workspace — eve agents and durable workflows — using `
 Drive the `stackbone` CLI to scaffold, develop, publish and operate a workspace. Covers:
 
 - **Auth** — `stackbone login` (device flow, RFC 8628), `whoami`, `current`.
-- **Project lifecycle** — `init` (scaffold a workspace shell, offline by default), `add agent|workflow|workflow-agent` (grow it), `link`, `organization use`, `metadata`.
-- **Local stack** — `stackbone dev` boots the whole workspace (Postgres, Redis, MinIO) with Studio at `:4242` and hot reload.
+- **Project lifecycle** — `init` (scaffold a workspace shell and link it), `add deep-agent|workflow|workflow-agent` (grow it, offline), `link`, `organization use`, `metadata`.
+- **Local stack** — `stackbone dev` boots the whole workspace (Postgres, Redis, MinIO) with Studio at `:4242`; deep agents run in-process on the standard OpenAI/Anthropic wire, hot-swapped on save.
 - **Workflows** — `stackbone workflows list / schema / start` to inspect and trigger the durable workflows an install exposes.
-- **Publish** — `stackbone publish` compiles every agent + workflow and packs the workspace bundle tar (digest-verifiable; the platform provisioning flow uploads it).
+- **Publish** — `stackbone publish` esbuilds every agent + workflow and packs the workspace bundle tar (digest-verifiable; the platform provisioning flow uploads it).
 - **Database** — `stackbone db migrate up/create/status` plus a read-only `db query / schemas / table` explorer; the RAG schema is platform-provisioned.
 - **Operate an install** — runs, logs, hitl, secrets, config, storage, rag, prompts, contract, openrouter (local-dev install by default, or `--agent <id>`).
 - **Docs in the terminal** — `stackbone docs` prints SDK / CLI / agent.yaml docs inline.
@@ -90,7 +88,7 @@ Drive the `stackbone` CLI to scaffold, develop, publish and operate a workspace.
 
 Triage failures in a Stackbone workspace (`stackbone dev` or a deployed install). Covers:
 
-- **HITL runs stuck** — `stackbone hitl list`, decide / inspect a parked `requestApproval` gate.
+- **HITL runs stuck** — `stackbone hitl list`, decide / inspect a parked `requestApproval` gate or an agent turn `interrupted` on a gated tool.
 - **Durable runs failing or timing out** — read the run timeline + per-step log frames.
 - **Workflow input rejected** — a `start`/`chat` body that fails the workflow's `inputSchema` (400 `workflow_input_invalid`).
 - **SDK errors** — the `{ data, error }` envelope and the most common `<prefix>_<reason>` codes.
@@ -98,7 +96,7 @@ Triage failures in a Stackbone workspace (`stackbone dev` or a deployed install)
 - **Database** — slow queries, missing indexes, `pgvector` distance vs index mismatch.
 - **Secrets / config** — decryption errors, missing injected env vars.
 - **Scheduled workflows** — a cron schedule that never fired, fired twice, or whose run failed.
-- **Publish / build** — `stackbone publish` aborts (native dep, `@stackbone/sdk` inlined instead of external, eve partially traced).
+- **Publish / build** — `stackbone publish` aborts (native dep, `@stackbone/sdk` inlined instead of external).
 
 **Use this skill when**: the user reports an error, a stuck run, an unexpected HTTP status, or asks "why didn't this work". The skill guides diagnostic command execution; it does not propose fixes.
 

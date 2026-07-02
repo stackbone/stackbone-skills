@@ -10,7 +10,7 @@ End-to-end document ingest + retrieval over the agent's own Neon. Composes:
 
 `stackbone.rag` is the recommended path for any document Q&A flow. Hand-roll only when you need a custom schema (e.g. multi-tenant collections with per-row RLS).
 
-`import { stackbone } from '@stackbone/sdk'`. Reach `stackbone.rag` from any tool's `execute()` or any workflow step. The RAG schema (the `rag_*` tables + the pgvector HNSW index) is platform-provisioned per install — there is no creator-side setup; the only knob is `rag.embeddingModel` in `agent.yaml`.
+`import { stackbone } from '@stackbone/sdk'`. Reach `stackbone.rag` from any tool's `execute()` or any workflow step. The RAG schema (the `rag_*` tables + the pgvector HNSW index) is platform-provisioned per install — there is no creator-side setup; the only knob is `rag.embeddingModel` in an optional `agent.yaml` (create one only to override the default model).
 
 ## Configuring the embedding model
 

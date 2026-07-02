@@ -1,12 +1,45 @@
-# Human-in-the-loop (`requestApproval`) — SDK integration
+# Human-in-the-loop — SDK integration
 
-> Folder note: this lives under `hitl/` because the **feature** is human-in-the-loop. The authoring primitive is `requestApproval()` from `@stackbone/sdk/workflow`; the lower-level inbox surface it writes to is `stackbone.approval`.
+HITL exists at **two levels**, resolved through the **same approvals inbox** (Studio HITL tab, `stackbone hitl approve|reject`):
+
+| Level                                 | Where the pause lives       | Authoring primitive                                |
+| ------------------------------------- | --------------------------- | -------------------------------------------------- |
+| **Tool-level** (inside an agent turn) | The agent's durable session | `interruptOn` on `defineDeepAgent`                 |
+| **Workflow-level** (between steps)    | A Workflow SDK hook (Redis) | `requestApproval()` from `@stackbone/sdk/workflow` |
+
+The lower-level inbox surface both write to is `stackbone.approval`; you rarely call it directly.
+
+## Tool-level — `interruptOn` on a deep agent
+
+Gate a tool behind human approval by naming it in the agent config:
+
+```ts
+// deep-agents/support/index.ts
+export default defineDeepAgent({
+  model: 'anthropic/claude-haiku-4.5',
+  systemPrompt: '…',
+  tools: [sendMail],
+  interruptOn: { send_mail: true }, // pause BEFORE send_mail runs
+});
+```
+
+- `true` pauses every call of that tool; an object value is a LangChain `InterruptOnConfig` passed verbatim (e.g. `allowedDecisions`, `description`) for finer control.
+- **A pause needs a durable session.** The paused state persists in the LangGraph checkpointer, so the client must be on a server-side session (the `x-stackbone-session` header). A **stateless** turn that hits a gated tool fails with an error telling the caller to send the header. The workspace must have `@langchain/langgraph-checkpoint-postgres` installed (the scaffold pins it).
+
+What happens on a pause:
+
+1. The turn ends as a **well-formed standard response** (Anthropic `stop_reason: 'tool_use'` / OpenAI `finish_reason: 'tool_calls'`) — no proprietary frames.
+2. The run shows as `interrupted` and an approvals row appears in the inbox (topic `tool-approval for <tool> on <agent>`).
+3. A human decides — Studio inbox, or `stackbone hitl approve|reject <id> --yes`. **Approve** resumes the turn server-side on the same session and the tool executes; **reject** resumes with the refusal surfaced to the model (`--reason` becomes its message). The client never re-POSTs the turn — the resumed reply lands on the same run.
+4. New messages into a paused session are rejected (`approval_pending`) until the decision lands.
+
+## Workflow-level — `requestApproval()`
 
 A workflow that needs a person to decide **pauses durably** with `requestApproval()` from `@stackbone/sdk/workflow` (NOT the main barrel — the subpath statically imports the `workflow` peer). It writes a row the Studio HITL inbox shows, then races the human decision against a timeout. The pause is durable: the process can die and the run resumes from the same gate when the decision (or the timeout) arrives — the hook state lives in Redis, keyed by your `token`.
 
 **It must be called from the workflow body, never inside a `'use step'`** — pausing on a hook is a workflow primitive that suspends the run. Do all I/O in steps; keep the gate in the body.
 
-## The gate
+### The gate
 
 ```ts
 // workflows/refund.workflow.ts
@@ -37,7 +70,7 @@ export async function refundWorkflow(input: z.infer<typeof inputSchema>) {
 }
 ```
 
-## Options
+### Options
 
 | Option     | Required | Notes                                                                                              |
 | ---------- | -------- | -------------------------------------------------------------------------------------------------- |
@@ -48,7 +81,7 @@ export async function refundWorkflow(input: z.infer<typeof inputSchema>) {
 | `timeout`  | no       | ISO-8601 duration (`'24h'`, `'90m'`) or milliseconds. Omit for no deadline.                        |
 | `fallback` | no       | `'approve'` \| `'reject'` — the decision applied if the timeout wins the race. Default `'reject'`. |
 
-## The decision
+### The decision
 
 `requestApproval` resolves to `{ status, payload?, timedOut }`:
 
@@ -56,7 +89,7 @@ export async function refundWorkflow(input: z.infer<typeof inputSchema>) {
 - `payload` is whatever the human attached when deciding (optional).
 - `timedOut` is `true` only when the `fallback` was applied because nobody decided in time. A run that "resumed on its own and rejected" is the fallback firing — check the `timeout` / `fallback`.
 
-## Resolving the decision
+### Resolving the decision
 
 A human decides in the Studio HITL inbox, or from the shell:
 
@@ -82,12 +115,13 @@ The host resumes the parked run by `token` (`POST /api/workflows/hooks/:token/re
 
 ## Common mistakes
 
-| Mistake                                            | Fix                                                                        |
-| -------------------------------------------------- | -------------------------------------------------------------------------- |
-| Calling `requestApproval` inside a `'use step'`    | It's a workflow primitive — call it from the `'use workflow'` body.        |
-| Running the side-effect before checking `status`   | Gate it: `if (decision.status !== 'approved') return …` before the effect. |
-| Reusing one `token` for several approvals in a run | Each approval needs its own unique `token` (it's the resume key).          |
-| Expecting `timedOut` to mean "rejected by a human" | `timedOut: true` is the `fallback` firing, not a human decision.           |
+| Mistake                                              | Fix                                                                             |
+| ---------------------------------------------------- | ------------------------------------------------------------------------------- |
+| Calling `requestApproval` inside a `'use step'`      | It's a workflow primitive — call it from the `'use workflow'` body.             |
+| Gating a tool with `interruptOn` on a stateless chat | The pause needs a durable session — the client must send `x-stackbone-session`. |
+| Running the side-effect before checking `status`     | Gate it: `if (decision.status !== 'approved') return …` before the effect.      |
+| Reusing one `token` for several approvals in a run   | Each approval needs its own unique `token` (it's the resume key).               |
+| Expecting `timedOut` to mean "rejected by a human"   | `timedOut: true` is the `fallback` firing, not a human decision.                |
 
 ## Common error codes
 

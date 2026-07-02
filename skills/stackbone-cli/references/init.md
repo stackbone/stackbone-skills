@@ -1,6 +1,6 @@
 # `stackbone init`
 
-Scaffold a new Stackbone workspace. Workspace-first and offline by default (`--with empty`) — it emits the project shell and runs no network call unless you ask for an agent-creating first piece.
+Scaffold a new Stackbone workspace **and link it** to your organization. `init` is workspace-first: it emits the project shell and, for **every** `--with` kind, registers the workspace in the control plane and writes the single `.stackbone/project.json` link — so you must be signed in first (`stackbone login`). There is no offline `init`.
 
 ## Synopsis
 
@@ -12,45 +12,45 @@ stackbone init [dir] [--with empty|agent|workflow|workflow-agent] [--name <ws>] 
 
 1. Pick the target directory:
    - With a `dir` positional: writes the workspace into `./<dir>/`.
-   - Without `dir`: writes into the current directory.
-2. Emit the workspace shell — a multi-piece project (`agents/` + `workflows/`):
-   - `agents/` — one eve agent per subfolder (`agents/<name>/agent.yaml`).
+   - Without `dir`: writes into a subdirectory derived from the workspace name (so a bare `init` from a parent folder doesn't pollute it).
+2. Emit the workspace shell — a multi-piece project (`deep-agents/` + `workflows/`):
+   - `deep-agents/` — one deep agent per subfolder (each a `deep-agents/<name>/index.ts` default-exporting `defineDeepAgent(...)`).
    - `workflows/` — durable workflows (`workflows/<name>.workflow.ts`).
-   - `package.json`, `tsconfig.json`, an `.npmrc` (eve needs a hoisted `node_modules`), `.gitignore`, and a `README`.
+   - `package.json` (with `deepagents`, `@langchain/*`, `workflow` and `@stackbone/sdk` pinned at the root — the process must resolve ONE copy of each), `tsconfig.json`, an `.npmrc` (hoisted `node_modules` for the same reason), `.gitignore`, and a `README`.
    - Best-effort: install the Stackbone agent skills (`stackbone`, `stackbone-cli`, `stackbone-debug`) into the directories your coding tools recognize.
 3. Scaffold the optional first piece chosen by `--with` on top of the shell:
-   - `empty` (default) — shell only, fully offline.
-   - `agent` — one eve agent under `agents/<name>/`.
+   - `empty` (default) — shell only.
+   - `agent` — one deep agent at `deep-agents/<name>/index.ts`.
    - `workflow` — one durable workflow at `workflows/<name>.workflow.ts`.
-   - `workflow-agent` — an agent plus a workflow already wired to call it.
+   - `workflow-agent` — a deep agent plus a workflow already wired to call it.
    - With a TTY and no `--with`, `init` shows an interactive picker for the first piece.
-4. Only the agent-creating kinds touch the network. `--with agent` and `--with workflow-agent` register the agent eagerly in the control plane and create a local-dev installation row, so you must be signed in. `--with empty` and `--with workflow` are fully offline.
+4. **Link the workspace.** For every `--with` kind, `init` registers the workspace's identity (an agent named after the workspace) and its local-dev installation, then writes `.stackbone/project.json`. That single link is what `stackbone dev`, `stackbone publish` and the management commands read. Because linking hits the control plane, `init` fails fast with exit `2` if you are not signed in — before any files are written.
 
 ## Flags
 
-| Flag                                            | Description                                                                                                       |
-| ----------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
-| `--with empty\|agent\|workflow\|workflow-agent` | The optional first piece to scaffold on top of the shell. Defaults to `empty` (shell only, offline).              |
-| `--name <ws>`                                   | The workspace name (and the default name for the first piece). The `dir` positional sets the target subdirectory. |
-| `--force`                                       | Overwrite existing files in the target directory.                                                                 |
-| `--json`                                        | Emit a JSON envelope.                                                                                             |
-| `--yes`                                         | Skip "directory exists, overwrite?" confirmations.                                                                |
+| Flag                                            | Description                                                                                                                 |
+| ----------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| `--with empty\|agent\|workflow\|workflow-agent` | The optional first piece to scaffold on top of the shell. Defaults to `empty` (shell only). Every kind links the workspace. |
+| `--name <ws>`                                   | The workspace name (and the default name for the first piece). The `dir` positional sets the target subdirectory.           |
+| `--force`                                       | Overwrite existing files in the target directory.                                                                           |
+| `--json`                                        | Emit a JSON envelope.                                                                                                       |
+| `--yes`                                         | Skip "directory exists, overwrite?" confirmations.                                                                          |
 
 > There is no `--starter` / `--template` / `--slug` / `--description` on `init` anymore. Starters are gone from `init`; passing `--starter` or `--template` prints a migration message and exits non-zero. Per-piece templates now live on `add` (`--template`).
 
 ## Examples
 
 ```sh
-# Offline workspace shell, writes to ./my-thing/ (no network call)
+# Workspace shell, linked to your org, written to ./my-thing/ (needs login)
 stackbone init my-thing
 
-# Interactive: pick the first piece, then writes the workspace
+# Interactive: pick the first piece, then writes + links the workspace
 stackbone init my-thing --name my-thing
 
-# Start with an agent (registers it in the control plane — must be signed in)
+# Start with an agent (the agent is the workspace's linked identity)
 stackbone init my-thing --with agent --name support-bot
 
-# Start with a durable workflow (offline)
+# Start with a durable workflow (still links the workspace)
 stackbone init my-thing --with workflow --json --yes
 ```
 
@@ -62,7 +62,7 @@ npm install              # or pnpm install
 stackbone dev            # boots the local stack + Studio on 127.0.0.1:4242
 ```
 
-By default (`--with empty`) `init` creates no agent and makes no network call — you start from an offline workspace shell. An agent identity (and a `.stackbone/` local-dev install) only appears when you scaffold an agent-creating piece: either `init --with agent|workflow-agent`, or later via `stackbone add agent` / `stackbone add workflow-agent`. To re-attach a fresh clone, run `stackbone link`.
+The workspace is already linked, so `stackbone dev` boots straight away — it reads the `.stackbone/project.json` that `init` wrote. To attach a **fresh clone** (where `.stackbone/` is gitignored and therefore absent), run `stackbone link`.
 
 ### JSON envelope (`--json`)
 
@@ -72,68 +72,38 @@ By default (`--with empty`) `init` creates no agent and makes no network call �
   "workspace": { "name": "…", "dir": "…" },
   "with": "empty|agent|workflow|workflow-agent",
   "files_written": ["…"],
-  // present only for --with agent | workflow-agent:
   "agent": { "id": "…", "slug": "…", "name": "…" },
   "local_dev_installation": { "id": "…", "organization_slug": "…" },
   "skills_install": "…",
 }
 ```
 
-The `agent` and `local_dev_installation` keys appear only for `--with agent | workflow-agent`.
+The `agent` and `local_dev_installation` keys are **always** present — `init` links the workspace for every `--with` kind.
 
 ## `stackbone add`
 
-Add a single piece to the current workspace. `add` must run inside a workspace. It **only writes new files** — it never edits your existing TypeScript and never edits `stackbone.config.ts`. A name collision fails with a clear error; re-run with `--force` to overwrite.
-
-```sh
-stackbone add agent <name>          [--template <t>] [--json] [--yes] [--force]
-stackbone add workflow <name>       [--template <t>] [--calls <agent>] [--json] [--yes] [--force]
-stackbone add workflow-agent <name> [--template <t>] [--json] [--yes] [--force]
-```
-
-- **`add agent <name>`** — writes one eve agent folder under `agents/<name>/` and registers it eagerly in the control plane plus its own local-dev install, so you must be signed in. Idempotent: re-running `add agent <name>` resolves the same control-plane row.
-- **`add workflow <name>`** — writes one durable workflow at `workflows/<name>.workflow.ts`. Never touches the control plane (workflows are dev-only today), so no login is required. `--calls <agent>` wires a step inside the workflow that delegates a turn to that agent (the workflow → agent hybrid).
-- **`add workflow-agent <name>`** — the composed template: scaffolds an agent **and** a workflow already wired to call it (the qualify-lead → lead-qualifier pattern). Registers the agent like `add agent`.
-
-JSON envelope (`--json`):
-
-```jsonc
-{
-  "schema_version": "…",
-  "kind": "agent|workflow|workflow-agent",
-  "name": "…",
-  "target_dir": "…",
-  "files_written": ["…"],
-  "registered_in_config": false,
-  // for agent / workflow-agent:
-  "control_plane_agent": { "id": "…", "slug": "…", "name": "…" },
-  "local_dev_installation": { "id": "…", "organization_slug": "…" },
-  // for workflow: "control_plane_agent": null (no local_dev_installation)
-}
-```
+Once a workspace exists, grow it one piece at a time with `stackbone add deep-agent|workflow|workflow-agent <name>`. `add` runs **inside a workspace** and is **100% offline**: the pieces you add are members of the already-linked workspace, not separate registrations, so they never touch the network and never re-write `.stackbone/project.json`. See [references/add.md](add.md) for the full reference.
 
 ## Discovery by convention
 
 The workspace registry is derived from the files on disk — there is no hand-maintained registry. `stackbone dev` and `stackbone publish` both read the same convention:
 
-- **Agents** — every `agents/<name>/agent.yaml`. The manifest `name:` field is authoritative and must equal the folder basename.
+- **Agents** — every `deep-agents/<name>/` folder containing an `index.ts`. The folder basename is the agent's name.
 - **Workflows** — every `workflows/<name>.workflow.ts`. The workflow name is the file basename without the `.workflow.ts` suffix; the exported function is `<camelCase(name)>Workflow` (e.g. `qualify-lead.workflow.ts` exports `qualifyLeadWorkflow`).
-- **`stackbone.config.ts`** (default-exporting `defineWorkspace({ agents, workflows })`) is an **optional override**: if present it wins over the convention scan; if absent the workspace is discovered from the files. Most projects need no `stackbone.config.ts` at all.
+- **`stackbone.config.ts`** (default-exporting `defineWorkspace({ agents: [], workflows })`) is an **optional override for the workflow list only** — deep agents are always discovered from their folders. Most projects need no `stackbone.config.ts` at all.
 
 ## Exit codes
 
 | Code | When                                                                                             |
 | ---- | ------------------------------------------------------------------------------------------------ |
-| 0    | Scaffold completed                                                                               |
+| 0    | Scaffold completed and workspace linked                                                          |
 | 1    | Name collision without `--force`, unknown `--with` value, unknown `--template`, disk write error |
-| 2    | Not authenticated (an agent-creating `init`/`add` run while not signed in)                       |
-| 3    | No project (an `add` run outside a workspace, or `dev` with no project)                          |
+| 2    | Not authenticated (`init` links the workspace, so it needs a signed-in session for every kind)   |
 
 ## Common mistakes
 
 - **Confusing `dir` and `--name`.** The positional is the target directory (`stackbone init my-thing`); `--name <ws>` is the workspace name (and default first-piece name). They are different things.
-- **Passing `--starter` / `--template` to `init`.** Both are gone from `init` — they print a migration message and exit non-zero. `--template` is now a per-piece flag on `add` (e.g. `stackbone add agent <name> --template <t>`).
-- **Expecting `init` to create an agent.** The default `--with empty` is offline and creates no agent. Use `--with agent|workflow-agent` (or `stackbone add agent`) to register one.
-- **Running `add` outside a workspace.** `add` must run inside a workspace (exit code `3` otherwise).
+- **Passing `--starter` / `--template` to `init`.** Both are gone from `init` — they print a migration message and exit non-zero. `--template` survives only as a flag on `stackbone add workflow <name> --template <t>`.
+- **Running `init` while signed out.** `init` links the workspace to your org, so it needs a session — run `stackbone login` first (exit code `2` otherwise). There is no offline `init`.
 - **Forgetting `npm install`.** The scaffolded project has a `package.json` with dependencies; the CLI does not install them.
-- **Committing `.stackbone/`.** `init`/`add` gitignore it; sharing it leaks the per-developer local-dev install id and makes `stackbone dev` sessions collide.
+- **Committing `.stackbone/`.** `init` gitignores it; sharing it leaks the per-developer local-dev install id and makes `stackbone dev` sessions collide. A fresh clone re-links with `stackbone link`.

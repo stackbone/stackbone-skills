@@ -1,77 +1,74 @@
 ---
 name: stackbone
 description: >-
-  Use this skill when writing the inside of a Stackbone workspace with @stackbone/sdk and eve:
-  the workspace is discovered by convention from the files on disk (agents/<name>/agent.yaml +
-  workflows/<name>.workflow.ts), with an optional stackbone.config.ts override via
-  defineWorkspace({ agents, workflows }) that wins when present,
-  authoring a durable eve agent (agent.ts with a model + build.externalDependencies, instructions.md,
-  tools under tools/ via defineTool from 'eve/tools'), writing durable workflows as 'use workflow' /
-  'use step' functions with sibling inputSchema/outputSchema, and reaching the ambient `stackbone` client
-  from inside a tool's execute() or a workflow step — stackbone.database (Drizzle over Neon Postgres),
-  stackbone.storage (file uploads), stackbone.ai (LLM chat / embeddings via OpenRouter), stackbone.rag
-  (ingest + hybrid search), stackbone.config / stackbone.secrets / stackbone.prompts, stackbone.agent(id)
-  to call a sibling agent, and stackbone.connection(id) to call a third-party connector — plus
-  human-in-the-loop pauses via requestApproval() from @stackbone/sdk/workflow.
+  Use this skill when writing the inside of a Stackbone workspace with @stackbone/sdk:
+  the workspace is discovered by convention from the files on disk (deep-agents/<name>/index.ts
+  + workflows/<name>.workflow.ts), authoring a deep agent (a single index.ts default-exporting
+  defineDeepAgent({ model, systemPrompt, tools, subagents, interruptOn }) from @stackbone/sdk/deep,
+  with LangChain tools and connectorTool(...) for third-party operations), writing durable workflows
+  as 'use workflow' / 'use step' functions with sibling inputSchema/outputSchema, calling an agent
+  from a workflow step with callDeepAgent(name, input) from @stackbone/sdk/workflow, and reaching the
+  ambient `stackbone` client from inside a tool or a workflow step — stackbone.database (Drizzle over
+  Neon Postgres), stackbone.storage (file uploads), stackbone.ai (LLM chat / embeddings via OpenRouter),
+  stackbone.rag (ingest + hybrid search), stackbone.config / stackbone.secrets / stackbone.prompts,
+  and stackbone.connection(id) to call a third-party connector — plus human-in-the-loop both ways:
+  requestApproval() in a workflow body and tool-level interruptOn pauses inside an agent turn.
   Trigger on requests like: build an agent, add a tool, write a workflow, store user data, upload a file,
-  call an LLM, ingest docs for RAG, pause until a human approves, call another agent, call a connector,
-  read dynamic config, or add an optional stackbone.config.ts override on top of convention discovery.
-  For CLI tasks (init, dev, publish, db migrate, runs, hitl, trigger), use the stackbone-cli skill instead.
+  call an LLM, ingest docs for RAG, pause until a human approves, gate a tool behind approval,
+  call another agent, call a connector, read dynamic config.
+  For CLI tasks (init, dev, publish, db migrate, runs, hitl), use the stackbone-cli skill instead.
   For triage of errors and stuck runs, use the stackbone-debug skill.
 license: MIT
 metadata:
   author: stackbone
-  version: '0.4.1'
+  version: '1.1.0'
   organization: Stackbone
-  date: June 2026
+  date: July 2026
 ---
 
 # Stackbone SDK skill
 
-This skill covers writing code **inside** a Stackbone workspace — what the creator authors with `@stackbone/sdk` and `eve`. The workspace is discovered by convention from the files on disk (`agents/<name>/agent.yaml` + `workflows/<name>.workflow.ts`); an optional `stackbone.config.ts` is an override that wins when present. For everything around the workspace (scaffolding, the dev emulator, publishing, db migrations, triggering runs) use the **stackbone-cli** skill.
+This skill covers writing code **inside** a Stackbone workspace — what the creator authors with `@stackbone/sdk`. The workspace is discovered by convention from the files on disk (`deep-agents/<name>/index.ts` + `workflows/<name>.workflow.ts`). For everything around the workspace (scaffolding, the dev emulator, publishing, db migrations, triggering runs) use the **stackbone-cli** skill.
 
 ## The mental model in four sentences
 
-- A workspace is a project that contains **agents** and **workflows**, **discovered by convention from the files on disk**: every `agents/<name>/agent.yaml` is an agent and every `workflows/<name>.workflow.ts` is a workflow. An optional `stackbone.config.ts` (default-exporting `defineWorkspace({ agents, workflows })`) is an **override that wins when present** — most projects need none. Each agent is a directory under `agents/<name>/`; each workflow is a `*.workflow.ts` module.
-- An **agent** is a durable [eve](https://eve.dev/docs/introduction) agent: a model + instructions + tools that hold a conversation across turns. You author it as files under `agents/<name>/agent/` — `agent.ts` (model + build config), `instructions.md` (the system prompt), and one tool per file under `tools/`. The runtime serves it over a signed `/eve/v1/*` session API; you never write HTTP code.
-- A **workflow** is durable, replayable code: a plain async function marked `'use workflow'` whose individual side-effects are marked `'use step'`. Each step is a checkpoint — kill the runtime mid-run and it resumes from the last completed step. Workflows run on the [Workflow SDK](https://workflow-sdk.dev/docs).
-- All persistence lives in the agent's own Postgres (Neon): relational data, vectors (`pgvector`), full-text (`tsvector`), the approvals inbox, the prompt catalog, dynamic config. From any tool's `execute()` or any workflow step you reach it through the **ambient `stackbone` client** — `import { stackbone } from '@stackbone/sdk'` — with no `createClient()` and no credential wiring.
+- A workspace is a project that contains **deep agents** and **workflows**, **discovered by convention from the files on disk**: every `deep-agents/<name>/` folder with an `index.ts` default-exporting `defineDeepAgent(...)` is an agent, and every `workflows/<name>.workflow.ts` is a workflow. An optional `stackbone.config.ts` (default-exporting `defineWorkspace({ agents: [], workflows })`) can override the **workflow** list only — deep agents are always discovered from their folders. Most projects need none.
+- A **deep agent** is a [deepagents](https://github.com/langchain-ai/deepagentsjs) (LangGraph) agent: a model + system prompt + tools that hold a conversation across turns. You author it as **one file** — `deep-agents/<name>/index.ts` — with the system prompt inline. It runs **in-process** inside the runtime (no server, no port of its own); the runtime serves it to any client over the standard **OpenAI Chat Completions** and **Anthropic Messages** endpoints, selected by the `model` field. You never write HTTP code.
+- A **workflow** is durable, replayable code: a plain async function marked `'use workflow'` whose individual side-effects are marked `'use step'`. Each step is a checkpoint — kill the runtime mid-run and it resumes from the last completed step. Workflows run on the [Workflow SDK](https://workflow-sdk.dev/docs). A workflow step calls a sibling agent in-process with `callDeepAgent(name, input)`.
+- All persistence lives in the agent's own Postgres (Neon): relational data, vectors (`pgvector`), full-text (`tsvector`), the approvals inbox, the prompt catalog, dynamic config. From any tool or any workflow step you reach it through the **ambient `stackbone` client** — `import { stackbone } from '@stackbone/sdk'` — with no `createClient()` and no credential wiring.
 
 ## Quick setup
 
 ### 1. Scaffold (CLI)
 
-Use the **stackbone-cli** skill. `stackbone init` is **workspace-first and offline by default** — it emits only the workspace shell (an `agents/` folder, a `workflows/` folder, `package.json`, `tsconfig.json`, an `.npmrc`, `.gitignore`, a README, and the coding-agent skills) with **no `stackbone.config.ts` and no agent**, and runs no network call. A first piece is opt-in via `--with`: `empty` (shell only — the default), `agent`, `workflow`, or `workflow-agent`. Only the agent-creating kinds (`agent`, `workflow-agent`) touch the network — they register the agent in the control plane, so you must be signed in; `empty` and `workflow` are fully offline. Once you have a workspace, add more pieces with `stackbone add agent|workflow|workflow-agent <name>` — see the **stackbone-cli** skill for the full command surface.
+Use the **stackbone-cli** skill. `stackbone init` is **workspace-first** — it emits the workspace shell (a `deep-agents/` folder, a `workflows/` folder, `package.json` with the runtime deps pinned, `tsconfig.json`, an `.npmrc`, `.gitignore`, a README) and links it to your org, so you must be signed in. A first piece is opt-in via `--with`: `empty` (shell only — the default), `agent`, `workflow`, or `workflow-agent`. Once you have a workspace, add more pieces **offline** with `stackbone add deep-agent|workflow|workflow-agent <name>` — see the **stackbone-cli** skill for the full command surface.
 
-### 2. Install the SDK (and the eve peers you use)
+### 2. Install the SDK (and the peers you use)
 
 ```sh
 npm install @stackbone/sdk
 ```
 
-`@stackbone/sdk` declares `eve` and `workflow` as **optional peer dependencies**. Install the ones your workspace actually uses:
+`@stackbone/sdk` declares `deepagents`, `@langchain/core`, `@langchain/langgraph`, `@langchain/openai` and `workflow` as **optional peer dependencies**, resolved from the **workspace root** `package.json` (they must live there — a single copy per process). `stackbone init` / `stackbone add deep-agent` pin them for you; if you wire a workspace by hand:
 
 ```sh
-npm install eve                 # to author an agent (agent.ts / tools)
-npm install workflow            # to author a workflow that pauses for approval
-npm install @ai-sdk/openai-compatible   # to bind the OpenRouter-compatible model
+npm install deepagents @langchain/core @langchain/langgraph @langchain/openai   # to author a deep agent
+npm install workflow                                                            # to author a durable workflow
+npm install @langchain/langgraph-checkpoint-postgres                            # durable server-side sessions + tool-level HITL
 ```
 
-A tool-only agent that never imports `@stackbone/sdk/workflow` or `@stackbone/sdk/connect` never loads those peers, so `import { stackbone } from '@stackbone/sdk'` stays peer-free.
+A workflow that never imports `@stackbone/sdk/deep` never loads the LangChain peers, and `import { stackbone } from '@stackbone/sdk'` stays peer-free.
 
-### 3. Declare the workspace (optional)
+### 3. Declare the workspace (optional, workflows only)
 
-You usually **do not** write this. The workspace is discovered by convention: every `agents/<name>/agent.yaml` (whose `name:` equals the folder basename) is an agent, and every `workflows/<name>.workflow.ts` (exporting `<camelCase(name)>Workflow`) is a workflow. Add a `stackbone.config.ts` only when you need to **override** that scan — when present it wins over the convention:
+You usually **do not** write this. Deep agents are **always** discovered from their `deep-agents/<name>/index.ts` folders — a `stackbone.config.ts` cannot declare them (its `agents` list is legacy and stays empty). Add one only to **override the workflow scan**:
 
 ```ts
-// stackbone.config.ts — OPTIONAL override; only needed when convention discovery isn't enough
+// stackbone.config.ts — OPTIONAL override; only the workflow list can be overridden
 import { defineWorkspace } from '@stackbone/sdk';
 
 export default defineWorkspace({
-  agents: [
-    { name: 'support', dir: 'agents/support' },
-    { name: 'billing', dir: 'agents/billing' },
-  ],
+  agents: [],
   workflows: [
     {
       name: 'onboarding',
@@ -82,99 +79,58 @@ export default defineWorkspace({
 });
 ```
 
-- An **agent** entry is `{ name, dir }`. The `name` is the agent's folder under `agents/`; `dir` is the path to that folder.
-- A **workflow** entry is `{ name, module, export }`. The `name` is how you address/trigger it (`stackbone workflows schema <name>`, `POST /api/workflows/<name>/start`); `module` is the `*.workflow.ts` path; `export` is the exported function name inside it.
+A **workflow** entry is `{ name, module, export }`. The `name` is how you address/trigger it (`stackbone workflows schema <name>`, `POST /api/workflows/<name>/start`); `module` is the `*.workflow.ts` path; `export` is the exported function name inside it.
 
-## Authoring an eve agent
+## Authoring a deep agent
 
-An agent lives under `agents/<name>/agent/`:
+An agent is **one file**, `deep-agents/<name>/index.ts` — the folder name is the agent's name:
 
 ```
-agents/support/
-  package.json            ← name: "support"
-  agent/
-    agent.ts              ← model + build config (default export = defineAgent)
-    instructions.md       ← the system prompt
-    tools/
-      read_config.ts      ← one tool per file (default export = defineTool)
-      escalate.ts
+deep-agents/support/
+  index.ts               ← default export = defineDeepAgent({ model, systemPrompt, tools, ... })
 ```
-
-### `agent.ts` — the model + build config
 
 ```ts
-// agents/support/agent/agent.ts
-import { createOpenAICompatible } from '@ai-sdk/openai-compatible';
-import { defineAgent } from 'eve';
-
-// Stackbone injects the org's managed OpenRouter sub-key as OPENROUTER_API_KEY.
-// OpenRouter exposes an OpenAI-compatible API, so bind it as a provider instance.
-// eve routes a provider instance directly (a BARE model string would route
-// through the Vercel AI Gateway, which Stackbone does not use).
-const openrouter = createOpenAICompatible({
-  name: 'openrouter',
-  baseURL: process.env.OPENROUTER_BASE_URL ?? 'https://openrouter.ai/api/v1',
-  apiKey: process.env.OPENROUTER_API_KEY,
-});
-
-export default defineAgent({
-  model: openrouter('anthropic/claude-haiku-4.5'),
-  // A custom provider carries no context-window metadata, so declare it.
-  modelContextWindowTokens: 200_000,
-  // Keep @stackbone/sdk (and eve) external so the agent shares ONE invocation
-  // context. Inlining the SDK gives the agent a second copy of the SDK's
-  // invocation-context AsyncLocalStorage and per-run logs arrive with no run id.
-  // `stackbone publish` enforces this — an agent that omits it aborts the build.
-  build: { externalDependencies: ['@stackbone/sdk', 'eve*'] },
-});
-```
-
-> Import `defineAgent` from **`eve`** (the agent's model + build config) — not from `@stackbone/sdk`.
-
-The agent's name comes from the `name:` field in **`agents/<name>/agent.yaml`** — and it **must equal the folder basename** (that match is the key the convention scan resolves agents by). You do not write the name in `agent.ts`. The system prompt lives in `agents/<name>/agent/instructions.md`.
-
-### A tool — `agents/<name>/agent/tools/<tool>.ts`
-
-One tool per file, default-exporting `defineTool` from `eve/tools`. The tool's `execute()` is where you reach the ambient `stackbone` client.
-
-```ts
-// agents/support/agent/tools/read_config.ts
-import { defineTool } from 'eve/tools';
+// deep-agents/support/index.ts
+import { tool } from '@langchain/core/tools';
+import { defineDeepAgent, connectorTool } from '@stackbone/sdk/deep';
 import { stackbone, z } from '@stackbone/sdk';
 
-export default defineTool({
-  description:
-    "Return the agent's current dynamic configuration. Call to confirm how the " +
-    'agent is configured before replying.',
-  inputSchema: z.object({}),
-  async execute() {
+const readConfig = tool(
+  async () => {
     const greeting = await stackbone.config.get('greeting');
-    const all = await stackbone.config.getAll();
-    return {
-      greeting: greeting.error ? null : greeting.data,
-      all: all.error ? null : all.data,
-    };
+    return JSON.stringify(greeting.error ? null : greeting.data);
   },
+  {
+    name: 'read_config',
+    description: "Return the agent's current dynamic configuration.",
+    schema: z.object({}),
+  },
+);
+
+export default defineDeepAgent({
+  // A bare model id routes through the managed OpenRouter bridge (the org's
+  // sub-key is injected at runtime as OPENROUTER_API_KEY). Pass a built
+  // LangChain chat-model instance instead for full control.
+  model: 'anthropic/claude-haiku-4.5',
+  // The system prompt lives INLINE here (or imported from a sibling .ts file
+  // for long prompts) — never a .md file loaded by convention.
+  systemPrompt: 'You are the support agent. Use your tools before answering.',
+  tools: [
+    readConfig,
+    // A third-party operation as a tool — brokered by Stackbone Connect:
+    connectorTool({ connector: 'slack', operation: 'chat.postMessage' }),
+  ],
+  // Optional: gate a tool behind human approval (see the HITL section below):
+  // interruptOn: { send_mail: true },
 });
 ```
 
-A tool with arguments destructures them from the `execute` parameter (validated against `inputSchema`):
+- Tools are plain **LangChain tools** (`tool()` from `@langchain/core/tools`, with a Zod `schema`); inside the tool body you reach any ambient surface — `stackbone.database`, `stackbone.ai`, `stackbone.storage`, ….
+- `subagents` accepts deepagents sub-agent configs verbatim; `interruptOn` gates tools behind human approval.
+- Runtime dependencies (`deepagents`, `@langchain/*`) live in the **workspace root** `package.json` — a deep agent has no per-agent `package.json`.
 
-```ts
-export default defineTool({
-  description: 'Escalate this lead to a human sales rep.',
-  inputSchema: z.object({
-    leadId: z.string().describe('CRM contact id'),
-    reason: z.string().describe('Short reason for the hand-off'),
-  }),
-  async execute({ leadId, reason }) {
-    await stackbone.database.insert(escalations).values({ leadId, reason });
-    return { leadId, tagged: 'needs-human' };
-  },
-});
-```
-
-> **Deep dive:** [agents/authoring.md](agents/authoring.md) — full agent layout, the tool pattern, and the eve doc references.
+> **Deep dive:** [agents/authoring.md](agents/authoring.md) — the full `defineDeepAgent` config, the tool pattern, and how the agent is served over the standard wire.
 
 ## Authoring a durable workflow
 
@@ -266,8 +222,9 @@ await stackbone.workflows.schedule('daily-digest', { scope: 'all' }, '0 9 * * *'
 | `stackbone.secrets`        | Read operator-managed encrypted secrets: `get(name)` / `getMany(names)`                                     | `{ data, error }`                        |
 | `stackbone.prompts`        | Versioned prompt catalog: `get()` / `compile(key, vars)` / `list()` / `create()` / …                        | `{ data, error }`                        |
 | `stackbone.approval`       | Agent-local HITL records (used by `requestApproval` under the hood — see below)                             | `{ data, error }`                        |
-| `stackbone.agent(id)`      | Call a sibling agent by name — opens a session, sends a turn (see below)                                    | `result()` → `{ data, status }`          |
 | `stackbone.connection(id)` | Call a third-party connector by id (Stackbone Connect — see below)                                          | `Promise<output>` / **throws** by code   |
+
+> To call a **sibling agent** from a workflow step, use `callDeepAgent(name, input)` from `@stackbone/sdk/workflow` (see below) — it is a standalone helper, not a `stackbone.*` surface.
 
 The one rule across every surface: **destructure `{ data, error }` and handle both branches.** The sole exception is `stackbone.database` (native Drizzle — it returns rows and throws).
 
@@ -281,28 +238,28 @@ if (error) throw new Error(error.message); // propagate the failure
 
 `throw` to propagate a failure; branch on `error.code` to handle a known case and `return` instead. **Never swallow the `error` branch.** The error envelope is `{ code, message, meta? }` (`SdkError`).
 
-> `stackbone.database` is native Drizzle: tables are `pgTable` objects from `agents/<name>/schema.ts`; helpers (`eq`, `and`, `sql`, …) come from `@stackbone/sdk/db`. Awaiting a query returns the typed rows and **throws** on error — there is no envelope.
+> `stackbone.database` is native Drizzle: tables are `pgTable` objects from the workspace's `src/schema.ts`; helpers (`eq`, `and`, `sql`, …) come from `@stackbone/sdk/db`. Awaiting a query returns the typed rows and **throws** on error — there is no envelope.
 
-### Calling a sibling agent — `stackbone.agent(id)`
+### Calling a sibling agent — `callDeepAgent`
 
-From a workflow step (or another agent's tool), open a session and send a turn. The turn's structured reply is validated against the `outputSchema` you pass.
+From a workflow step, call a sibling agent **in-process** with `callDeepAgent(name, input)` from `@stackbone/sdk/workflow` — no HTTP, no session plumbing. The whole agent turn runs as that one durable step.
 
 ```ts
+import { callDeepAgent } from '@stackbone/sdk/workflow';
+
 async function askSupportForTips(plan: string) {
   'use step';
-  const session = stackbone.agent('support').session();
-  const response = await session.send<{ tips: string[] }>({
-    message: `A customer joined the "${plan}" plan. Give up to 3 onboarding tips.`,
-    outputSchema: z.object({ tips: z.array(z.string()) }),
-  });
-  const result = await response.result(); // { data, status }
-  return result.data ?? { tips: [] };
+  const { text } = await callDeepAgent(
+    'support',
+    `A customer joined the "${plan}" plan. Give up to 3 onboarding tips.`,
+  );
+  return text;
 }
 ```
 
-`session().send(...)` returns a response you collect with `result()` (`{ data, status }` where `status` is `'completed' | 'failed' | 'waiting'`) or iterate with `for await...of` for the live stream. `id` is an agent name resolved by the workspace convention scan — the `agents/<name>/` folder basename (its `agent.yaml` `name:`) — optionally overridden by a `stackbone.config.ts`.
+`input` is a bare string (one user message) or `{ messages: [{ role, content }] }` (roles `system` | `user` | `assistant`) to carry prior turns; the result is `{ text }`. `name` is the `deep-agents/<name>/` folder basename, narrowed to the workspace's real agent names once `stackbone dev` has generated `.stackbone/agents.d.ts`.
 
-> **Deep dive:** [workflow-agents/authoring.md](workflow-agents/authoring.md) — calling an agent from a workflow, with the structured (`result()`) and streaming (`for await`) reply forms.
+> **Deep dive:** [workflow-agents/authoring.md](workflow-agents/authoring.md) — calling an agent from a workflow, multi-turn input, and idempotency of the turn-as-step.
 
 ### Calling a connector — `stackbone.connection(id)`
 
@@ -320,11 +277,14 @@ async function sendMail(input: { to: string; subject: string; body: string }) {
 
 - `stackbone.connection(id).<operation>(args)` is the typed form (once `.stackbone/connect.d.ts` is generated); `stackbone.connection(id).call('<operation>', args)` is the always-available dynamic escape hatch (use it for a dotted operation id like `'chat.postMessage'`).
 - The call returns the operation output and **throws** a `ConnectorCallError` on failure — match `err.code` (the broker taxonomy: `invalid_args`, `credential_error`, `timeout`, …), never `instanceof`.
-- See `/docs/concepts/connect` (in the wiki) for the broker model and how operators register connector credentials. To author a richer eve connection (e.g. an OpenAPI connection with brokered auth) use `connect(connectorId)` from `@stackbone/sdk/connect`.
+- See `/docs/concepts/connect` (in the wiki) for the broker model and how operators register connector credentials. To hand a connector operation **to the model as a tool**, use `connectorTool({ connector, operation })` from `@stackbone/sdk/deep` in the agent's `tools` array (see [connections/sdk-integration.md](connections/sdk-integration.md)).
 
-## Human-in-the-loop — `requestApproval`
+## Human-in-the-loop — two levels
 
-A workflow that needs a person to decide pauses **durably** with `requestApproval()` from `@stackbone/sdk/workflow` (NOT the main barrel — the subpath statically imports the `workflow` peer). It writes a row the Studio inbox shows, then races the human decision against a timeout.
+HITL exists at two levels, resolved through the **same approvals inbox** (Studio HITL tab, `stackbone hitl approve|reject`):
+
+- **Tool-level (inside an agent turn)** — `interruptOn: { <tool>: true }` on `defineDeepAgent`. The turn pauses before the gated tool runs, an approvals row appears, and the decision resumes the turn server-side on the same session. Requires a durable session (the client sends `x-stackbone-session`). See [hitl/sdk-integration.md](hitl/sdk-integration.md).
+- **Workflow-level (between steps)** — `requestApproval()` from `@stackbone/sdk/workflow` (NOT the main barrel — the subpath statically imports the `workflow` peer). It writes a row the Studio inbox shows, then races the human decision against a timeout:
 
 ```ts
 // workflows/refund.workflow.ts — pause until a human decides.
@@ -380,14 +340,14 @@ The runtime injects these at boot; **never hardcode them, never ask the user for
 | Identity    | `AGENT_ID`, `WORKSPACE_ID`, `STACKBONE_INSTALLATION_ID`                         |
 | Persistence | `DATABASE_URL`, `STACKBONE_SECRET_KEY`                                          |
 | Security    | `HMAC_SECRET` (signs the runtime's session/workflow/connector calls)            |
-| Workflows   | `WORKFLOW_REDIS_URL` (durable step state), `AGENT_URLS` (sibling-agent routing) |
+| Workflows   | `WORKFLOW_REDIS_URL` (durable step state)                                       |
 | LLM         | `OPENROUTER_API_KEY`, `OPENROUTER_BASE_URL` (managed sub-key, passthrough cost) |
 
 > Observability needs **no env var from you**: the runtime auto-instruments outbound calls and correlates `console.*` output with the right run. There is no observability surface to configure.
 
-## agent.yaml — the per-agent manifest
+## agent.yaml — the optional workspace manifest
 
-`stackbone.config.ts` is an **optional workspace-level override** — by default the workspace is discovered by convention from the files on disk, and the config only wins when present. Each agent carries its own per-agent `agent.yaml` (model engine, database paths, RAG embedding model, required connectors, seeded automations); this is the manifest the convention scan reads, and its `name:` must equal the folder basename. The schema is `.strict()` — an unknown key fails parse. See [agent-yaml.md](agent-yaml.md) for the full reference.
+A deep agent needs **no manifest** — the `deep-agents/<name>/` folder plus its `index.ts` is the whole definition. An `agent.yaml` at the **workspace root** is optional and not scaffolded; when present, `stackbone dev` reads only `database.schema` / `database.migrations` and `dev.autoMigrate` from it (everything else falls back to convention defaults — `./src/schema.ts`, `./.stackbone/migrations`, auto-migrate on). The richer blocks (runtime, rag, connections, automations) belong to the classic single-agent manifest / the publish-time build. The schema is `.strict()` — an unknown key fails parse. See [agent-yaml.md](agent-yaml.md) for the full reference.
 
 ## Authoring guides
 
@@ -395,24 +355,24 @@ The full authoring reference for each workspace piece:
 
 | Piece                                                | Doc                                                          |
 | ---------------------------------------------------- | ------------------------------------------------------------ |
-| An eve agent (model, instructions, tools)            | [agents/authoring.md](agents/authoring.md)                   |
+| A deep agent (model, system prompt, tools)           | [agents/authoring.md](agents/authoring.md)                   |
 | A durable workflow (`'use workflow'` / `'use step'`) | [workflows/authoring.md](workflows/authoring.md)             |
-| A workflow that calls an agent (streaming or direct) | [workflow-agents/authoring.md](workflow-agents/authoring.md) |
+| A workflow that calls an agent (`callDeepAgent`)     | [workflow-agents/authoring.md](workflow-agents/authoring.md) |
 
 ## Per-surface deep dives
 
 The full method shapes and worked examples for each ambient surface live in the leaf docs — read the one your task touches:
 
-| Task                                                      | Doc                                                              |
-| --------------------------------------------------------- | ---------------------------------------------------------------- |
-| Drizzle queries, transactions, vectors, full-text, paging | [database/sdk-integration.md](database/sdk-integration.md)       |
-| Uploads, the `key` handle, public/signed URLs             | [storage/sdk-integration.md](storage/sdk-integration.md)         |
-| Chat/embeddings, **streaming** long completions, vision   | [ai/sdk-integration.md](ai/sdk-integration.md)                   |
-| Ingest and hybrid retrieval                               | [rag/sdk-integration.md](rag/sdk-integration.md)                 |
-| Durable HITL pauses (`requestApproval`)                   | [hitl/sdk-integration.md](hitl/sdk-integration.md)               |
-| Versioned prompt catalog + `compile()`                    | [prompts/sdk-integration.md](prompts/sdk-integration.md)         |
-| Connector operations (typed + `.call`)                    | [connections/sdk-integration.md](connections/sdk-integration.md) |
-| Triggering & scheduling workflows, background work        | [scheduling/sdk-integration.md](scheduling/sdk-integration.md)   |
+| Task                                                       | Doc                                                              |
+| ---------------------------------------------------------- | ---------------------------------------------------------------- |
+| Drizzle queries, transactions, vectors, full-text, paging  | [database/sdk-integration.md](database/sdk-integration.md)       |
+| Uploads, the `key` handle, public/signed URLs              | [storage/sdk-integration.md](storage/sdk-integration.md)         |
+| Chat/embeddings, **streaming** long completions, vision    | [ai/sdk-integration.md](ai/sdk-integration.md)                   |
+| Ingest and hybrid retrieval                                | [rag/sdk-integration.md](rag/sdk-integration.md)                 |
+| HITL pauses (tool-level `interruptOn` + `requestApproval`) | [hitl/sdk-integration.md](hitl/sdk-integration.md)               |
+| Versioned prompt catalog + `compile()`                     | [prompts/sdk-integration.md](prompts/sdk-integration.md)         |
+| Connector operations (typed + `.call`)                     | [connections/sdk-integration.md](connections/sdk-integration.md) |
+| Triggering & scheduling workflows, background work         | [scheduling/sdk-integration.md](scheduling/sdk-integration.md)   |
 
 ## Branch the backend for risky changes
 
@@ -420,8 +380,8 @@ If a change depends on a schema migration, a new RLS policy, a `rag.embeddingMod
 
 ## Important notes
 
-- **No HTTP framework choice, no Dockerfile.** The runtime serves the agent (`/eve/v1/*`) and the workflows (`/api/workflows/*`); you write neither HTTP routes nor a Dockerfile. The platform buildpack builds the container from your workspace.
-- **Keep `@stackbone/sdk` (and eve) external in `build.externalDependencies`.** Inlining the SDK gives the agent a second copy of the invocation-context store and per-run logs lose their run id. `stackbone publish` enforces this.
+- **No HTTP framework choice, no Dockerfile.** The runtime serves each agent over the standard **OpenAI Chat Completions** + **Anthropic Messages** endpoints (selected by the `model` field) and the workflows over `/api/workflows/*`; you write neither HTTP routes nor a Dockerfile.
+- **One copy of the SDK and LangChain per process.** `stackbone publish` bundles each agent with `@stackbone/sdk`, `deepagents` and `@langchain/*` kept **external**, resolved from the workspace root `node_modules` — an inlined second SDK copy splits the invocation context and per-run logs lose their run id. Keep those deps pinned at the workspace root (the scaffold does this), never in a per-agent `package.json`.
 - **Steps must be idempotent.** A `'use step'` is retried on failure and replayed on resume — code it so running twice is safe.
 - **The agent owns its data.** Stackbone never reads or writes the agent's Neon directly.
 - **`requestApproval` lives on `@stackbone/sdk/workflow`**, not the main barrel — importing it from `@stackbone/sdk` will not resolve.

@@ -26,7 +26,7 @@ The call returns the operation **output** (the JSON the provider returned) verba
 
 ## Disambiguating when there are several connections
 
-When the account holds **more than one** connection of the same connector, a bare call is `connections_ambiguous`. Pass the connection **id** or **unique name** (both from `stackbone connectors --json`) to pick one:
+When the account holds **more than one** connection of the same connector, a bare call throws with code `ambiguous`. Pass the connection **id** or **unique name** (both from `stackbone connectors --json`) to pick one:
 
 ```ts
 // by unique name (readable, survives a re-connect):
@@ -63,9 +63,33 @@ try {
 | `unauthorized`     | Caller identity rejected by the broker                            | A platform/install issue; surface and retry.          |
 | `unavailable`      | Broker or provider unreachable / returned 5xx                     | Transient — surface the message and retry once.       |
 
+## Handing an operation to the model — `connectorTool`
+
+To let a **deep agent decide** when to run a connector operation, wrap it as a tool with `connectorTool` from `@stackbone/sdk/deep` and put it in the agent's `tools` array:
+
+```ts
+import { defineDeepAgent, connectorTool } from '@stackbone/sdk/deep';
+
+export default defineDeepAgent({
+  model: 'anthropic/claude-haiku-4.5',
+  systemPrompt: '…',
+  tools: [
+    connectorTool({
+      connector: 'slack', // connector id from `stackbone connectors --json`
+      operation: 'chat.postMessage', // operation id (dotted ids are fine)
+      // name?: defaults to a sanitized `slack_chat_postMessage`
+      // description?: what the model reads to decide when to call it
+      // schema?: a Zod schema for the args
+    }),
+  ],
+});
+```
+
+At runtime the tool body goes through the **same broker path** as `stackbone.connection(id)` — same credential brokering, same error taxonomy — and returns the operation output to the model as a JSON string. Gate it behind human approval with `interruptOn: { slack_chat_postMessage: true }` (see [hitl/sdk-integration.md](../hitl/sdk-integration.md)).
+
 ## Authoring a connection with `connect()`
 
-To author a richer eve connection (e.g. an OpenAPI connection whose auth is brokered), use `connect(connectorId)` from `@stackbone/sdk/connect`. It returns a connection-auth adapter whose `getToken` fetches a short-lived, install-scoped bearer from the broker — so the connector's `execute()` never holds the raw secret:
+To author a richer connection (e.g. an OpenAPI connection whose auth is brokered), use `connect(connectorId)` from `@stackbone/sdk/connect`. It returns a connection-auth adapter whose `getToken` fetches a short-lived, install-scoped bearer from the broker — so the calling code never holds the raw secret:
 
 ```ts
 import { connect } from '@stackbone/sdk/connect';

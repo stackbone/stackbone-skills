@@ -2,7 +2,7 @@
 
 Drive the human-in-the-loop approvals inbox of the targeted agent installation. Targets the local-dev install by default; override with `--agent <id>`. `list` is paginated (`--limit` + `--cursor`). `approve` and `reject` decide a pending approval — both **destructive**, both require `--yes`.
 
-> In the SDK, a workflow opens the pause with `requestApproval()` from `@stackbone/sdk/workflow` (backed by the `stackbone.approval` inbox surface). The CLI verb group is named `hitl` after the product concept — same approvals, different entrypoint. See the **stackbone** skill for the SDK side.
+> The same inbox carries **both HITL levels**: workflow pauses opened with `requestApproval()` from `@stackbone/sdk/workflow`, and **tool-level agent pauses** opened by `interruptOn` on a deep agent (topic `tool-approval for <tool> on <agent>`). Deciding either resumes the parked run server-side — for an agent pause, `approve` executes the gated tool and the resumed reply lands on the same run; `reject` surfaces your `--reason` to the model. See the **stackbone** skill's HITL doc for the SDK side.
 
 ## Subcommands
 

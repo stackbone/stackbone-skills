@@ -2,31 +2,28 @@
 
 A Stackbone project is a **workspace** with two manifest layers:
 
-- **Convention scan (primary).** The workspace registry is **derived from the files on disk** — there is no hand-maintained list to keep in sync. `stackbone dev` and `stackbone publish` both read this same convention. Agents are every `agents/<name>/agent.yaml`; workflows are every `workflows/<name>.workflow.ts`. Most projects need no config file at all.
-- **`stackbone.config.ts` (optional override).** A file that default-exports `defineWorkspace({ agents, workflows })`. If present it **wins** over the convention scan; if absent the workspace is discovered from the files. Reach for it only when you need to override what the scan finds; see the **stackbone** skill for the full shape.
-- **`agent.yaml`** — the **per-agent manifest.** Each agent folder under `agents/` carries one (model engine, database paths, RAG embedding model, required connectors, seeded automations) — the manifest the convention scan reads, with its `name:` equal to the folder basename. The schema is `.strict()`.
+- **Convention scan (primary).** The workspace registry is **derived from the files on disk** — there is no hand-maintained list to keep in sync. `stackbone dev` and `stackbone publish` both read this same convention. Agents are every `deep-agents/<name>/` folder with an `index.ts` (default-exporting `defineDeepAgent(...)`); workflows are every `workflows/<name>.workflow.ts`. Most projects need no config file at all.
+- **`stackbone.config.ts` (optional override, workflows only).** A file that default-exports `defineWorkspace({ agents: [], workflows })`. If present, its **workflow** list wins over the workflow scan; deep agents are **always** discovered from their folders and cannot be declared here. Reach for it only when you need to override the workflow scan; see the **stackbone** skill for the full shape.
+- **`agent.yaml`** — an **OPTIONAL workspace manifest.** It is **not** the discovery marker and is **not** scaffolded by default. When present at the workspace root, `stackbone dev` reads only `database.schema` / `database.migrations` and `dev.autoMigrate` from it; the richer blocks below (runtime, rag, connections, automations, protocol) apply to the classic single-agent manifest and the publish-time build. The schema is `.strict()`.
 
-This page is the field reference for `agent.yaml`.
+This page is the field reference for `agent.yaml` when you do write one.
 
 ## Discovery by convention
 
 The workspace shape comes straight from the directory layout:
 
-- **Agents** — every `agents/<name>/agent.yaml`. The manifest's `name:` field is authoritative and **must equal the folder basename**.
+- **Agents** — every `deep-agents/<name>/` folder containing an `index.ts`. The folder basename is the agent's name; there is no per-agent `package.json` and no name field.
 - **Workflows** — every `workflows/<name>.workflow.ts`. The workflow name is the file basename without the `.workflow.ts` suffix; the exported function is `<camelCase(name)>Workflow` (e.g. `qualify-lead.workflow.ts` exports `qualifyLeadWorkflow`).
 
-You scaffold these pieces with `stackbone init` (workspace shell + an optional first piece) and `stackbone add` (each new agent / workflow / workflow-agent) — see the **stackbone-cli** skill. `add` only ever writes new files; it never edits your existing TypeScript and never edits `stackbone.config.ts`.
+You scaffold these pieces with `stackbone init` (workspace shell + an optional first piece) and `stackbone add` (each new deep-agent / workflow / workflow-agent) — see the **stackbone-cli** skill. `add` only ever writes new files; it never edits your existing TypeScript and never edits `stackbone.config.ts`.
 
-## `stackbone.config.ts` — the optional workspace override
+## `stackbone.config.ts` — the optional workflow override
 
 ```ts
 import { defineWorkspace } from '@stackbone/sdk';
 
 export default defineWorkspace({
-  agents: [
-    { name: 'support', dir: 'agents/support' },
-    { name: 'billing', dir: 'agents/billing' },
-  ],
+  agents: [],
   workflows: [
     {
       name: 'onboarding',
@@ -37,10 +34,10 @@ export default defineWorkspace({
 });
 ```
 
-- **`agents[]`** — `{ name, dir }`. `name` is the agent's folder under `agents/`; `dir` is the path to that folder.
+- **`agents[]`** — legacy, stays empty: deep agents are always discovered from their `deep-agents/<name>/` folders.
 - **`workflows[]`** — `{ name, module, export }`. `name` is how you address/trigger the workflow; `module` is the `*.workflow.ts` path; `export` is the exported function name inside it.
 
-When this file is absent — the common case — the same `agents[]` / `workflows[]` registry is inferred from the convention scan above, so you only author `stackbone.config.ts` to override that inference.
+When this file is absent — the common case — the workflow registry is inferred from the convention scan above, so you only author `stackbone.config.ts` to override that inference.
 
 A workflow declares its input/output **by convention** — sibling `inputSchema` / `outputSchema` exports next to the `'use workflow'` function (see the **stackbone** skill), not in this config. The build harvests them.
 
@@ -48,7 +45,7 @@ A workflow declares its input/output **by convention** — sibling `inputSchema`
 
 ## `agent.yaml` — the per-agent manifest
 
-The manifest of one agent. Lives in the agent's directory, next to its `package.json`.
+The manifest of one agent. In a classic single-agent project it lives at the project root; in a workspace, an optional root-level `agent.yaml` only feeds the database/dev keys (see above).
 
 > **The schema is `.strict()`.** Any key not listed below makes `stackbone dev` / `stackbone publish` **fail parse** with `Unrecognized key(s)`. Marketplace metadata (description, pricing, category, screenshots) is set in Studio / the create-template flow, **not** here — putting those keys in `agent.yaml` is a parse error, not a no-op.
 
@@ -113,7 +110,7 @@ Always the literal `stackbone.ai/v1`. Locks the manifest to this schema; future 
 
 ### `name` (required)
 
-The agent name. Lowercase, hyphens-only convention. Inside a workspace it **must equal the agent's folder basename** under `agents/` — the convention scan keys agents on `agents/<name>/agent.yaml` and treats this field as authoritative, so a mismatch is a discovery error.
+The agent name. Lowercase, hyphens-only convention. Inside a workspace the discovery scan keys agents on their `deep-agents/<name>/` folder basename, **not** on this file — `agent.yaml` never names a workspace agent.
 
 ### `version` (optional)
 
@@ -191,7 +188,7 @@ Each recipe is a ready-made automation the **install flow seeds** as an ordinary
 - **`key`** — a slug; the per-install idempotency key the seeder upserts on, so re-publishing updates the same automation instead of duplicating it.
 - **`name`** — human label (1–200 chars) shown in the install's automations list.
 - **`trigger`** — `{ connector, trigger }`: the catalog event that fires the recipe.
-- **`handler`** — the named entry the event routes to (for an eve agent, the routing target is the agent itself).
+- **`handler`** — the named entry the event routes to (for an agent, the routing target is the agent itself).
 - **`inputMapping` / `outputMapping`** — optional JSONata expressions applied before and after the handler (the same engine the runtime applies in production).
 - **`action`** — optional `{ connector, action }`: a connector action run with the handler's (mapped) output. Omit it for a trigger-only recipe.
 
@@ -220,4 +217,4 @@ These keys are **not** part of the on-disk manifest. Some are marketplace metada
 
 ## Validation
 
-`stackbone publish` validates the manifest against the schema before any network I/O — `stackbone publish --dry-run` runs that validation (plus build + scan + sign) without pushing. `stackbone dev` also parses the manifest on boot, so a schema error surfaces the moment you start the emulator. See the **stackbone-cli** skill for both.
+`stackbone publish` validates the manifest against the schema before any network I/O (there is **no** `--dry-run` flag — `publish` already writes only a local, digest-verifiable bundle and pushes nothing). `stackbone dev` also parses the manifest on boot, so a schema error surfaces the moment you start the emulator. See the **stackbone-cli** skill for both.

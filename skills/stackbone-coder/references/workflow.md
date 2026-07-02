@@ -42,7 +42,7 @@ These surfaces exist **only** inside a workflow (not in an agent tool), so raise
 
 - **Human-in-the-loop** — `requestApproval()` from `@stackbone/sdk/workflow`, called from the workflow **body** (never inside a step). Pauses the run durably until a human decides.
 - **Trigger / schedule other workflows** — `stackbone.workflows.start / startAndWait / schedule`, from the workflow body.
-- **Call an agent** — `stackbone.agent(id).session().send(...)` from a step (this turns it into a workflow-agent → see [workflow-agent.md](workflow-agent.md)).
+- **Call an agent** — `callDeepAgent(name, input)` from a step (this turns it into a workflow-agent → see [workflow-agent.md](workflow-agent.md)).
 
 ## Then → capabilities
 
