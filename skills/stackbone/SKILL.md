@@ -15,13 +15,15 @@ description: >-
   requestApproval() in a workflow body and tool-level interruptOn pauses inside an agent turn.
   Trigger on requests like: build an agent, add a tool, write a workflow, store user data, upload a file,
   call an LLM, ingest docs for RAG, pause until a human approves, gate a tool behind approval,
-  call another agent, call a connector, read dynamic config.
+  call another agent, call a connector, read dynamic config, give an agent a real browser to
+  navigate/act on/extract from a web page (browserTools / browserSubagent), run a workflow one at
+  a time in FIFO order (serial executionMode).
   For CLI tasks (init, dev, publish, db migrate, runs, hitl), use the stackbone-cli skill instead.
   For triage of errors and stuck runs, use the stackbone-debug skill.
 license: MIT
 metadata:
   author: stackbone
-  version: '1.1.0'
+  version: '1.2.0'
   organization: Stackbone
   date: July 2026
 ---
@@ -128,6 +130,7 @@ export default defineDeepAgent({
 
 - Tools are plain **LangChain tools** (`tool()` from `@langchain/core/tools`, with a Zod `schema`); inside the tool body you reach any ambient surface — `stackbone.database`, `stackbone.ai`, `stackbone.storage`, ….
 - `subagents` accepts deepagents sub-agent configs verbatim; `interruptOn` gates tools behind human approval.
+- To give the agent a **real browser**, add `browserSubagent()` to `subagents` or spread `browserTools()` into `tools` (both from `@stackbone/sdk/deep`) — see [browser/sdk-integration.md](browser/sdk-integration.md).
 - Runtime dependencies (`deepagents`, `@langchain/*`) live in the **workspace root** `package.json` — a deep agent has no per-agent `package.json`.
 
 > **Deep dive:** [agents/authoring.md](agents/authoring.md) — the full `defineDeepAgent` config, the tool pattern, and how the agent is served over the standard wire.
@@ -187,6 +190,7 @@ Rules that matter for workflows:
 - **`'use workflow'`** marks the durable orchestrator. The body should be cheap, deterministic glue — it replays on resume. Do the I/O in steps.
 - **`'use step'`** marks a checkpoint that runs **once**, is persisted, and is retried on failure. Make every step **idempotent** — on retry it may run again.
 - **Sibling `inputSchema` / `outputSchema`** are the workflow's public contract. The build extracts them so Studio renders an input form and the emulator validates `start` payloads. Derive the input parameter type with `z.infer<typeof inputSchema>`; declare `outputSchema` explicitly.
+- **Runs are concurrent by default.** To run a workflow **one at a time in FIFO order**, set `executionMode: 'serial'` on its `stackbone.config.ts` entry (a declared config field, not a sibling export). Overflow triggers queue durably and surface as `waiting` runs. See [workflows/authoring.md](workflows/authoring.md).
 - See `/docs/concepts/workflows` (in the wiki) for the durable-execution model in depth.
 
 > **Deep dive:** [workflows/authoring.md](workflows/authoring.md) — the directive rules, the typed contract, pauses, and every trigger path.
@@ -372,6 +376,7 @@ The full method shapes and worked examples for each ambient surface live in the 
 | HITL pauses (tool-level `interruptOn` + `requestApproval`) | [hitl/sdk-integration.md](hitl/sdk-integration.md)               |
 | Versioned prompt catalog + `compile()`                     | [prompts/sdk-integration.md](prompts/sdk-integration.md)         |
 | Connector operations (typed + `.call`)                     | [connections/sdk-integration.md](connections/sdk-integration.md) |
+| Giving an agent a real browser (navigate/act/extract)      | [browser/sdk-integration.md](browser/sdk-integration.md)         |
 | Triggering & scheduling workflows, background work         | [scheduling/sdk-integration.md](scheduling/sdk-integration.md)   |
 
 ## Branch the backend for risky changes

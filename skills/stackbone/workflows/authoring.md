@@ -53,6 +53,36 @@ No registration — the workflow is discovered from the file on disk:
 
 `stackbone dev` and `stackbone publish` both read this. A `stackbone.config.ts` (`defineWorkspace`) is an optional override (see [agent-yaml.md](../agent-yaml.md)).
 
+## Serialized (FIFO) execution
+
+By default a workflow's runs execute **concurrently** — trigger it N times and N runs go in parallel. Mark a workflow **`serial`** to run its executions **one at a time, in FIFO order**: while a run is active, every new trigger is enqueued on a durable per-workflow waiting list (each carrying its own input) and starts automatically, in arrival order, the moment the active run reaches a **terminal** state (`completed`, `failed`, or `cancelled` — a failed/cancelled run releases the lock, so it never wedges the queue).
+
+`executionMode` is a **declared config field**, NOT a sibling export like `inputSchema`/`schedules`. Set it on the workflow's `stackbone.config.ts` entry:
+
+```ts
+// stackbone.config.ts
+import { defineWorkspace } from '@stackbone/sdk';
+
+export default defineWorkspace({
+  agents: [],
+  workflows: [
+    // executionMode: 'serial' | 'concurrent' (default). Absence → concurrent.
+    {
+      name: 'reconcile',
+      module: 'workflows/reconcile.workflow.ts',
+      export: 'reconcileWorkflow',
+      executionMode: 'serial',
+    },
+    { name: 'digest', module: 'workflows/digest.workflow.ts', export: 'digestWorkflow' }, // stays concurrent
+  ],
+});
+```
+
+- **Adding a config makes its `workflows` list REPLACE the convention scan** (explicit beats implicit). So list **every** workflow you want hosted, not only the serial one — an omitted workflow disappears from discovery. The `.workflow.ts` files themselves are unchanged.
+- A queued trigger surfaces read-only as a run with status **`waiting`** in `stackbone dev` and the Studio runs view, so a backed-up queue is visible, not silent.
+- Scope is **global per workflow name**, FIFO, no de-dup and no numeric limit (per-key/per-tenant concurrency and `concurrency: N` are out of scope; the same field can host them later).
+- The gate lives in the shared World layer, so behavior is identical across `stackbone dev`, cloud, and self-host.
+
 ## Typed contract
 
 Sibling `inputSchema` / `outputSchema` Zod exports are the workflow's public contract. Input is validated **before a run starts** — a bad payload is rejected with field-level issues and nothing executes. Derive the parameter type with `z.infer<typeof inputSchema>`. Inspect a declared contract with `stackbone workflows schema <name>`.
@@ -68,7 +98,7 @@ A durable run can pause for minutes to months without holding a process open. Fr
 ## Triggering & scheduling
 
 - **CLI**: `stackbone workflows start <name> --input '<json>'`.
-- **From another workflow**: `stackbone.workflows.start(name, input)` (fire-and-forget → `{ runId }`) / `stackbone.workflows.startAndWait(name, input)` (durable wait → output) from the ambient `stackbone` client.
+- **From another workflow**: `stackbone.workflows.start(name, input)` (fire-and-forget → `{ status: 'started', runId }`) / `stackbone.workflows.startAndWait(name, input)` (durable wait → output) from the ambient `stackbone` client. Triggering a **`serial`** target whose lock is held returns `{ status: 'queued' }` with **no `runId`** — the run is on the waiting list and starts automatically when the lock frees; `startAndWait` waits through the queue.
 - **On a schedule**: a declarative `export const schedules = [{ cron, input }]` next to the workflow, or imperative `stackbone.workflows.schedule(name, input, cron)`. See [scheduling/sdk-integration.md](../scheduling/sdk-integration.md).
 - **HTTP**: `POST /api/workflows/:name/start` → `{ workflowName, runId }`, or `/api/workflows/:name/chat` (SSE, for chat-style workflows).
 

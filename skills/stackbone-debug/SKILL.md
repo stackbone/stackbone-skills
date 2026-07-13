@@ -20,7 +20,7 @@ description: >-
 license: MIT
 metadata:
   author: stackbone
-  version: '1.1.0'
+  version: '1.2.0'
   organization: Stackbone
   date: July 2026
 ---

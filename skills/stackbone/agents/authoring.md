@@ -42,18 +42,36 @@ export default defineDeepAgent({
 
 ### The config
 
-| Field          | Required | What it is                                                                                                                                                                                                                                                           |
-| -------------- | -------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `model`        | yes      | A bare model id string (`'anthropic/claude-haiku-4.5'`) routes through the **managed OpenRouter bridge** — the org's sub-key is injected at runtime as `OPENROUTER_API_KEY`. Pass a built LangChain chat-model instance instead for another provider / full control. |
-| `systemPrompt` | yes      | The system prompt, **inline** (or imported from a sibling `.ts` file for long prompts — never a `.md` loaded by convention).                                                                                                                                         |
-| `tools`        | no       | LangChain tools (`tool()` from `@langchain/core/tools`) and/or `connectorTool(...)` markers (see [connections/sdk-integration.md](../connections/sdk-integration.md)).                                                                                               |
-| `subagents`    | no       | deepagents sub-agent configs, passed verbatim to `createDeepAgent`.                                                                                                                                                                                                  |
-| `interruptOn`  | no       | Gate tools behind human approval: `{ <toolName>: true }` (or a LangChain `InterruptOnConfig` object). See [hitl/sdk-integration.md](../hitl/sdk-integration.md).                                                                                                     |
-| `backend`      | no       | The agent's file backend. Defaults to the Stackbone storage backend (files persist through `stackbone.storage`); override only if you know why.                                                                                                                      |
+| Field          | Required | What it is                                                                                                                                                                                                                                                                          |
+| -------------- | -------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `model`        | yes      | A bare model id string (`'anthropic/claude-haiku-4.5'`) routes through the **managed OpenRouter bridge** — the org's sub-key is injected at runtime as `OPENROUTER_API_KEY`. Pass a built LangChain chat-model instance instead for another provider / full control.                |
+| `systemPrompt` | yes      | The system prompt, **inline** (or imported from a sibling `.ts` file for long prompts — never a `.md` loaded by convention).                                                                                                                                                        |
+| `tools`        | no       | LangChain tools (`tool()` from `@langchain/core/tools`), `connectorTool(...)` markers (see [connections/sdk-integration.md](../connections/sdk-integration.md)), and `browserTools()` markers for a real browser (see [browser/sdk-integration.md](../browser/sdk-integration.md)). |
+| `subagents`    | no       | deepagents sub-agent configs, passed verbatim to `createDeepAgent` — plus the ready-made `browserSubagent()` (see [browser/sdk-integration.md](../browser/sdk-integration.md)).                                                                                                     |
+| `interruptOn`  | no       | Gate tools behind human approval: `{ <toolName>: true }` (or a LangChain `InterruptOnConfig` object). See [hitl/sdk-integration.md](../hitl/sdk-integration.md).                                                                                                                    |
+| `backend`      | no       | The agent's file backend. Defaults to the Stackbone storage backend (files persist through `stackbone.storage`); override only if you know why.                                                                                                                                     |
 
 ## A tool
 
 Tools are plain **LangChain tools**: the Zod `schema` validates the arguments the model passes, and the body destructures them. Inside the body you reach any ambient surface — `stackbone.database`, `stackbone.ai`, `stackbone.storage`, `stackbone.rag`, … (see the per-surface deep dives in the main [SKILL.md](../SKILL.md)). Return a **string** (LangChain tool outputs are messages — `JSON.stringify` structured results).
+
+## Browser tools
+
+To let an agent drive a **real web browser** (navigate, act, extract, screenshot), attach `browserSubagent()` (the default — an isolated `browser` specialist) or spread `browserTools()` into `tools`, both from `@stackbone/sdk/deep`:
+
+```ts
+import { defineDeepAgent, browserSubagent } from '@stackbone/sdk/deep';
+
+export default defineDeepAgent({
+  model: 'anthropic/claude-sonnet-4.5',
+  systemPrompt: 'You research topics. Delegate any web browsing to the browser subagent.',
+  subagents: [browserSubagent()], // isolates the navigation loop + contains prompt injection
+});
+```
+
+They need two extra workspace peers (`@browserbasehq/stagehand`, `playwright`) and run under the `stackbone dev` emulator today.
+
+> **Deep dive:** [browser/sdk-integration.md](../browser/sdk-integration.md) — the five tools, subagent vs direct tools, the domain allowlist, session pooling, and the headed/remote toggles.
 
 ## How the agent is served
 
