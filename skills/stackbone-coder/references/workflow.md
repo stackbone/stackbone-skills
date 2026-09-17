@@ -11,7 +11,7 @@ export async function <name>Workflow(input: z.infer<typeof inputSchema>) {
 }
 ```
 
-Your job here is to nail the **input schema**, the **output schema**, and the **steps**. For the exact directive rules and trigger paths follow the **stackbone** skill → `workflows/authoring.md`.
+Your job here is to nail the **input schema**, the **output schema**, and the **steps**. For the directive rules follow the **stackbone** skill; for the trigger paths and the full contract read the `Overview` and `Getting started` pages under SDK › Workflows (`list_docs`, then `get_doc`).
 
 ## The interview — ask one at a time
 
@@ -25,7 +25,8 @@ Your job here is to nail the **input schema**, the **output schema**, and the **
 
 ## Documentation
 
-- [Workflow SDK](https://workflow-sdk.dev/v5/docs)
+- `Overview` and `Getting started` under SDK › Workflows; a worked example under Examples › Workflows
+- [Workflow SDK](https://workflow-sdk.dev/docs)
 
 ## Map answers → the file
 
@@ -40,7 +41,7 @@ Your job here is to nail the **input schema**, the **output schema**, and the **
 
 These surfaces exist **only** inside a workflow (not in an agent tool), so raise them during the checklist:
 
-- **Human-in-the-loop** — `requestApproval()` from `@stackbone/sdk/workflow`, called from the workflow **body** (never inside a step). Pauses the run durably until a human decides.
+- **Human-in-the-loop** — `requestApproval()` from `@stackbone/sdk/workflow`, called from the workflow **body** (never inside a step). Pauses the run durably until a human decides. For a free-form reply (email the person, wake on their reply) reach for the raw `defineHook` escape hatch with an explicit `token` instead of `requestApproval` (`search_docs` `requestApproval`, area `sdk`).
 - **Trigger / schedule other workflows** — `stackbone.workflows.start / startAndWait / schedule`, from the workflow body.
 - **Call an agent** — `callDeepAgent(name, input)` from a step (this turns it into a workflow-agent → see [workflow-agent.md](workflow-agent.md)).
 

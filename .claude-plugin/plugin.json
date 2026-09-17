@@ -1,7 +1,7 @@
 {
   "name": "stackbone",
-  "description": "Agent skills for Stackbone: the platform for building and hosting durable AI agents. Creators author a workspace of deep agents (deepagents/LangGraph, served over the standard OpenAI/Anthropic chat endpoints) and durable workflows; organizations install them as agents that run in their own cloud with Postgres (Drizzle), object storage, durable execution (Redis), a human-in-the-loop inbox and an LLM gateway (OpenRouter). This plugin gives coding agents the full Stackbone surface: @stackbone/sdk (the ambient stackbone client — database, storage, AI, RAG, approval, prompts, secrets, config, plus stackbone.connection(id)), @stackbone/sdk/deep (defineDeepAgent + connectorTool + tool-level HITL), @stackbone/sdk/workflow (durable workflows + callDeepAgent + requestApproval), @stackbone/sdk/connect (Stackbone Connect), the CLI for scaffolding, publishing, workflows, runs and HITL, and diagnostics for runs, logs, HITL and connectors.",
-  "version": "1.2.0",
+  "description": "Agent skills for Stackbone: the platform for building and hosting durable AI agents. Creators author a workspace of deep agents (deepagents/LangGraph, served over the standard OpenAI/Anthropic chat endpoints) and durable workflows on @stackbone/sdk; organizations run them as agents in their own cloud with Postgres (Drizzle), object storage, durable execution (Redis), a human-in-the-loop inbox and a model gateway. The seven skills teach a coding agent how to work: the shapes and rules of the SDK (stackbone), how to drive the CLI (stackbone-cli), how to start a piece from a description (stackbone-coder), how to locate the cause of a failure (stackbone-debug), how to wire a workspace to the outside with connections, triggers and destinations (stackbone-integrations), how to put limits on a running agent (stackbone-guardrails) and how to measure whether it works (stackbone-evals). Every API detail, flag and error code is read from the Stackbone docs over MCP (https://docs.stackbone.ai/mcp, tools search_docs / get_doc / list_docs), or from https://docs.stackbone.ai/llms.txt without an MCP client.",
+  "version": "2.2.0",
   "author": {
     "name": "Stackbone",
     "url": "https://stackbone.ai"
@@ -9,6 +9,12 @@
   "homepage": "https://stackbone.ai",
   "repository": "https://github.com/stackbone/stackbone-skills",
   "license": "MIT",
+  "mcpServers": {
+    "stackbone-docs": {
+      "type": "http",
+      "url": "https://docs.stackbone.ai/mcp"
+    }
+  },
   "keywords": [
     "stackbone",
     "ai-agents",
@@ -23,6 +29,6 @@
     "pgvector",
     "rag",
     "hitl",
-    "openrouter"
+    "mcp"
   ]
 }

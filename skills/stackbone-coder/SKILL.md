@@ -18,25 +18,27 @@ description: >-
 license: MIT
 metadata:
   author: stackbone
-  version: '1.2.0'
+  version: '2.2.0'
   organization: Stackbone
-  date: July 2026
+  date: September 2026
 ---
 
 # Stackbone coder — generate a piece by interview
 
-This skill turns _"I want to build X"_ into a scaffolded, wired-up Stackbone piece. It is an **interview + scaffolding orchestrator**: it picks the right shape, runs `stackbone` CLI to lay down the files, then asks the user exactly what each surface needs and wires in only those. It does **not** replace the other skills — it calls them:
+This skill turns _"I want to build X"_ into a scaffolded, wired-up Stackbone piece. It is an **interview + scaffolding orchestrator**: it picks the right shape, runs the `stackbone` CLI to lay down the files, then asks the user exactly what each surface needs and wires in only those. It does **not** replace the other skills — it calls them:
 
-- **`stackbone`** skill → the SDK code (tools, workflow steps, the ambient `stackbone` client, every capability deep-dive).
-- **`stackbone-cli`** skill → the commands (`init`, `add`, `dev`, `login`, `publish`).
+- **`stackbone`** skill → the SDK code (the three shapes, the rules, the ambient `stackbone` client).
+- **`stackbone-cli`** skill → the commands (`login`, `init`, `add`, `dev`).
 - **`stackbone-debug`** skill → triage when a run misbehaves.
+
+The API itself (every `defineDeepAgent` option, every `stackbone.*` method) lives in the Stackbone docs, served over MCP as the `stackbone-docs` server (`search_docs`, `get_doc`, `list_docs`). A surface's page is titled like the surface under SDK (`stackbone.rag`, `stackbone.database`, …): `list_docs` for its path, then `get_doc`; a helper with no page of its own is found with `search_docs` on its name. Without those tools, fetch `https://docs.stackbone.ai/llms.txt` and follow the page's link to its raw markdown.
 
 ## Golden rules
 
 - **One question at a time.** Never dump the whole interview at once. Ask, get the answer, move on. Use a structured question tool (e.g. `AskUserQuestion`) when you have one.
 - **Default to the minimal piece.** Only add a capability the user says yes to. A tool-only agent or a single-step workflow is a perfectly good answer.
-- **Never ask for injected env.** `DATABASE_URL`, `OPENROUTER_API_KEY`, `HMAC_SECRET`, `WORKFLOW_REDIS_URL`, etc. are platform-managed — the runtime injects them. Don't ask for connection strings or keys.
-- **You orchestrate; the other skills implement.** When it's time to write code, follow the `stackbone` skill. When it's time to run a command, follow the `stackbone-cli` skill.
+- **Never ask for injected env.** `STACKBONE_POSTGRES_URL`, `MODEL_PROVIDER_API_KEY`, `MODEL_PROVIDER_BASE_URL`, `HMAC_SECRET`, etc. are platform-managed — the runtime injects them. Don't ask for connection strings or keys. The model provider is configured once in Studio.
+- **You orchestrate; the other skills implement.** When it's time to write code, follow the `stackbone` skill and read the surface's page. When it's time to run a command, follow the `stackbone-cli` skill.
 
 ## The flow (5 steps)
 
@@ -74,7 +76,7 @@ Open the matching reference and run its interview:
 
 ### 4. Capability checklist — one at a time
 
-Open [references/capabilities.md](references/capabilities.md) and walk **every** capability with the user, one question each: _do we need a database? storage? an LLM call? RAG? human-in-the-loop? a connector? prompts? config? secrets? a schedule? to call another agent?_ For each **yes**, the reference tells you the surface, where it's reachable from (tool vs. workflow step), what to add (a `schema.ts`, a line in an optional `agent.yaml`, a `config.schema.ts`…), and which `stackbone`-skill deep-dive to follow for the code.
+Open [references/capabilities.md](references/capabilities.md) and walk **every** capability with the user, one question each: _do we need a database? storage? an LLM call? RAG? human-in-the-loop? a connector? prompts? config? secrets? a schedule? to call another agent? a browser?_ For each **yes**, the reference tells you the surface, where it's reachable from (tool vs. workflow step), what to add (a `src/schema.ts`, a `config.schema.ts`…), and how to find the docs page for the code.
 
 ### 5. Wire & verify
 
@@ -87,4 +89,4 @@ Write the code with the **stackbone** skill, then boot the emulator with `stackb
 | [references/agent.md](references/agent.md)                   | The agent interview: role, system prompt, the tools (name / description / inputs / behaviour), model choice.                             |
 | [references/workflow.md](references/workflow.md)             | The workflow interview: trigger, input data, output data, the steps; how answers map to `inputSchema` / `outputSchema` and `'use step'`. |
 | [references/workflow-agent.md](references/workflow-agent.md) | The combined interview + the workflow step that calls the agent via `callDeepAgent`.                                                     |
-| [references/capabilities.md](references/capabilities.md)     | The full capability checklist — every surface, when it applies, what it adds, and the deep-dive pointer.                                 |
+| [references/capabilities.md](references/capabilities.md)     | The full capability checklist — every surface, when it applies, what it adds, and how to find its docs page.                             |
