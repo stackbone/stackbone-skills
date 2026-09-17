@@ -156,7 +156,7 @@ skills/
     └── SKILL.md                 # what each surface can do + zero to a comparison
 ```
 
-Every `SKILL.md` opens with the same **Where the facts live** block (the MCP server, `list_docs` at session start, when to `search_docs`, the `llms.txt` fallback). The four that route across the whole product also close with **How to find the page**: the rules that lead from a task to a docs page (a surface's page is titled like the surface, a command's page like the command, the rest is a search). No paths and no catalogue of pages: the agent resolves both through the MCP at run time, so a reorganisation of the docs site never breaks an installed skill. The frontmatter `description:` field is the trigger — Claude reads it to decide when to load a skill. Skills reference each other by name (`use the stackbone-cli skill instead`) so the agent routes itself.
+Every `SKILL.md` opens with the same **Where the facts live** block (the MCP server, `list_docs` at session start, when to `search_docs`, the `llms.txt` fallback). The two that route across the whole product, `stackbone` and `stackbone-cli`, also close with **How to find the page**: the rules that lead from a task to a docs page (a surface's page is titled like the surface, a command's page like the command, the rest is a search). No paths and no catalogue of pages: the agent resolves both through the MCP at run time, so a reorganisation of the docs site never breaks an installed skill. The frontmatter `description:` field is the trigger — Claude reads it to decide when to load a skill. Skills reference each other by name (`use the stackbone-cli skill instead`) so the agent routes itself.
 
 ## Contributing
 
